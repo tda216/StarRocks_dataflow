@@ -1,0 +1,7 @@
+boto3==1.35.99
+dbt-core==1.10.0
+dbt-starrocks==1.10.0
+minio==7.2.15
+mysql-connector-python==9.1.0
+PyMySQL==1.1.1
+requests==2.32.3

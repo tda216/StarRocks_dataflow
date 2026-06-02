@@ -1,0 +1,19 @@
+[2026-06-02T02:48:04.731+0000] {local_task_job_runner.py:123} INFO - ::group::Pre task execution logs
+[2026-06-02T02:48:04.757+0000] {taskinstance.py:2614} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: hotel_booking_pipeline.wait_for_starrocks manual__2026-06-02T02:47:56.651802+00:00 [queued]>
+[2026-06-02T02:48:04.763+0000] {taskinstance.py:2614} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: hotel_booking_pipeline.wait_for_starrocks manual__2026-06-02T02:47:56.651802+00:00 [queued]>
+[2026-06-02T02:48:04.764+0000] {taskinstance.py:2867} INFO - Starting attempt 1 of 4
+[2026-06-02T02:48:04.780+0000] {taskinstance.py:2890} INFO - Executing <Task(PythonOperator): wait_for_starrocks> on 2026-06-02 02:47:56.651802+00:00
+[2026-06-02T02:48:04.790+0000] {logging_mixin.py:190} WARNING - /home/***/.local/lib/python3.12/site-packages/***/task/task_runner/standard_task_runner.py:70 DeprecationWarning: This process (pid=97) is multi-threaded, use of fork() may lead to deadlocks in the child.
+[2026-06-02T02:48:04.792+0000] {standard_task_runner.py:72} INFO - Started process 98 to run task
+[2026-06-02T02:48:04.790+0000] {standard_task_runner.py:104} INFO - Running: ['***', 'tasks', 'run', 'hotel_booking_pipeline', 'wait_for_starrocks', 'manual__2026-06-02T02:47:56.651802+00:00', '--job-id', '11', '--raw', '--subdir', 'DAGS_FOLDER/hotel_booking_pipeline.py', '--cfg-path', '/tmp/tmp2tjxko25']
+[2026-06-02T02:48:04.797+0000] {standard_task_runner.py:105} INFO - Job 11: Subtask wait_for_starrocks
+[2026-06-02T02:48:04.845+0000] {task_command.py:467} INFO - Running <TaskInstance: hotel_booking_pipeline.wait_for_starrocks manual__2026-06-02T02:47:56.651802+00:00 [running]> on host b9fbd04a225d
+[2026-06-02T02:48:04.905+0000] {taskinstance.py:3134} INFO - Exporting env vars: AIRFLOW_CTX_DAG_OWNER='data-platform' AIRFLOW_CTX_DAG_ID='hotel_booking_pipeline' AIRFLOW_CTX_TASK_ID='wait_for_starrocks' AIRFLOW_CTX_EXECUTION_DATE='2026-06-02T02:47:56.651802+00:00' AIRFLOW_CTX_TRY_NUMBER='1' AIRFLOW_CTX_DAG_RUN_ID='manual__2026-06-02T02:47:56.651802+00:00'
+[2026-06-02T02:48:04.906+0000] {taskinstance.py:732} INFO - ::endgroup::
+[2026-06-02T02:48:05.039+0000] {logging_mixin.py:190} INFO - StarRocks is reachable at starrocks:9030
+[2026-06-02T02:48:05.039+0000] {python.py:240} INFO - Done. Returned value was: None
+[2026-06-02T02:48:05.056+0000] {taskinstance.py:341} INFO - ::group::Post task execution logs
+[2026-06-02T02:48:05.056+0000] {taskinstance.py:353} INFO - Marking task as SUCCESS. dag_id=hotel_booking_pipeline, task_id=wait_for_starrocks, run_id=manual__2026-06-02T02:47:56.651802+00:00, execution_date=20260602T024756, start_date=20260602T024804, end_date=20260602T024805
+[2026-06-02T02:48:05.104+0000] {local_task_job_runner.py:266} INFO - Task exited with return code 0
+[2026-06-02T02:48:05.138+0000] {taskinstance.py:3901} INFO - 1 downstream tasks scheduled from follow-on schedule check
+[2026-06-02T02:48:05.139+0000] {local_task_job_runner.py:245} INFO - ::endgroup::

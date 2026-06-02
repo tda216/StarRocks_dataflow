@@ -1,0 +1,13 @@
+hotel_booking:
+  target: dev
+  outputs:
+    dev:
+      type: starrocks
+      host: "{{ env_var('STARROCKS_HOST', 'starrocks') }}"
+      port: "{{ env_var('STARROCKS_QUERY_PORT', '9030') | int }}"
+      schema: "{{ env_var('STARROCKS_DATABASE', 'hotel_booking') }}"
+      catalog: "{{ env_var('STARROCKS_CATALOG', 'default_catalog') }}"
+      username: "{{ env_var('STARROCKS_USER', 'root') }}"
+      password: "{{ env_var('STARROCKS_PASSWORD', '') }}"
+      threads: "{{ env_var('DBT_THREADS', '1') | int }}"
+      query_timeout: 300

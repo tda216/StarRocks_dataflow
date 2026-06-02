@@ -1,0 +1,251 @@
+version: 2
+
+models:
+  - name: stg_hotel_bookings
+    description: Cleaned and typed staging model from raw_hotel_bookings.
+    columns:
+      - name: hotel
+        description: Hotel type.
+        tests:
+          - not_null
+      - name: arrival_date
+        description: Parsed arrival date.
+        tests:
+          - not_null
+      - name: is_canceled
+        description: Source cancellation flag cast to integer.
+        tests:
+          - accepted_values:
+              values: [0, 1]
+              quote: false
+
+  - name: int_booking_metrics
+    description: Booking-level model with derived metrics and analysis buckets.
+    columns:
+      - name: booking_id
+        description: Deterministic hash key generated from booking attributes.
+        tests:
+          - not_null
+      - name: total_nights
+        description: Non-negative total nights.
+        tests:
+          - non_negative
+      - name: adr
+        description: Clean ADR, with negative source ADR set to 0 for metrics.
+        tests:
+          - non_negative
+      - name: estimated_revenue
+        description: ADR multiplied by total nights.
+        tests:
+          - non_negative
+      - name: realized_revenue
+        description: Estimated revenue for non-cancelled bookings, else 0.
+        tests:
+          - non_negative
+
+  - name: fact_bookings
+    description: Booking-level fact table for downstream marts and Superset.
+    tests:
+      - not_empty
+    columns:
+      - name: booking_id
+        tests:
+          - not_null
+      - name: arrival_date
+        tests:
+          - not_null
+      - name: hotel
+        tests:
+          - not_null
+      - name: is_cancelled
+        tests:
+          - not_null
+          - accepted_values:
+              values: [0, 1]
+              quote: false
+      - name: total_nights
+        tests:
+          - non_negative
+      - name: adr
+        tests:
+          - non_negative
+      - name: estimated_revenue
+        tests:
+          - non_negative
+      - name: realized_revenue
+        tests:
+          - non_negative
+
+  - name: dim_date
+    description: Date dimension for arrival dates.
+    tests:
+      - not_empty
+    columns:
+      - name: date_day
+        tests:
+          - not_null
+
+  - name: dim_hotel
+    description: Hotel dimension.
+    tests:
+      - not_empty
+    columns:
+      - name: hotel
+        tests:
+          - not_null
+
+  - name: dim_room
+    description: Room type dimension using reserved and assigned room types.
+    tests:
+      - not_empty
+    columns:
+      - name: reserved_room_type
+        tests:
+          - not_null
+      - name: assigned_room_type
+        tests:
+          - not_null
+
+  - name: dim_market_segment
+    description: Market segment dimension.
+    tests:
+      - not_empty
+    columns:
+      - name: market_segment
+        tests:
+          - not_null
+
+  - name: dim_channel
+    description: Distribution channel dimension.
+    tests:
+      - not_empty
+    columns:
+      - name: distribution_channel
+        tests:
+          - not_null
+
+  - name: dim_country
+    description: Country dimension.
+    tests:
+      - not_empty
+    columns:
+      - name: country
+        tests:
+          - not_null
+
+  - name: dim_customer_type
+    description: Customer type dimension.
+    tests:
+      - not_empty
+    columns:
+      - name: customer_type
+        tests:
+          - not_null
+
+  - name: mart_daily_booking_revenue
+    description: Daily booking, cancellation, and revenue metrics.
+    tests:
+      - not_empty
+    columns:
+      - name: arrival_date
+        tests:
+          - not_null
+
+  - name: mart_monthly_booking_revenue
+    description: Monthly booking, cancellation, and revenue metrics.
+    tests:
+      - not_empty
+    columns:
+      - name: month_start_date
+        tests:
+          - not_null
+
+  - name: mart_hotel_performance
+    description: Hotel-level KPI mart.
+    tests:
+      - not_empty
+    columns:
+      - name: hotel
+        tests:
+          - not_null
+
+  - name: mart_room_performance
+    description: Room type performance mart.
+    tests:
+      - not_empty
+    columns:
+      - name: reserved_room_type
+        tests:
+          - not_null
+      - name: assigned_room_type
+        tests:
+          - not_null
+
+  - name: mart_market_segment_performance
+    description: Market segment KPI mart.
+    tests:
+      - not_empty
+    columns:
+      - name: market_segment
+        tests:
+          - not_null
+
+  - name: mart_channel_performance
+    description: Distribution channel KPI mart.
+    tests:
+      - not_empty
+    columns:
+      - name: distribution_channel
+        tests:
+          - not_null
+
+  - name: mart_country_performance
+    description: Country-level KPI mart.
+    tests:
+      - not_empty
+    columns:
+      - name: country
+        tests:
+          - not_null
+
+  - name: mart_cancellation_analysis
+    description: Cancellation analysis by hotel, segment, channel, deposit type, and lead-time bucket.
+    tests:
+      - not_empty
+    columns:
+      - name: hotel
+        tests:
+          - not_null
+      - name: lead_time_bucket
+        tests:
+          - not_null
+
+  - name: mart_lead_time_analysis
+    description: Lead-time bucket KPI mart.
+    tests:
+      - not_empty
+    columns:
+      - name: lead_time_bucket
+        tests:
+          - not_null
+
+  - name: mart_customer_type_performance
+    description: Customer type and guest type KPI mart.
+    tests:
+      - not_empty
+    columns:
+      - name: customer_type
+        tests:
+          - not_null
+      - name: guest_type
+        tests:
+          - not_null
+
+  - name: mart_simulated_pnl
+    description: Optional simulated PNL mart. Cost and margin fields are simulated, not real finance data.
+    tests:
+      - not_empty
+    columns:
+      - name: hotel
+        tests:
+          - not_null

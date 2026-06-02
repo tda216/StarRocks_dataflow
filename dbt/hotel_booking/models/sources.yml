@@ -1,0 +1,18 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: hotel_booking
+    description: Raw CSV data loaded from MinIO into StarRocks.
+    tables:
+      - name: raw_hotel_bookings
+        description: Raw Hotel Booking Demand records. Most fields are VARCHAR for robust CSV ingestion.
+        columns:
+          - name: hotel
+            description: Hotel type.
+            tests:
+              - not_null
+          - name: arrival_date_year
+            description: Arrival year from source CSV.
+            tests:
+              - not_null

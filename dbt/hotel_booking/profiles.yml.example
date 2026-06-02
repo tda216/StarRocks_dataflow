@@ -1,0 +1,13 @@
+hotel_booking:
+  target: dev
+  outputs:
+    dev:
+      type: starrocks
+      host: starrocks
+      port: 9030
+      schema: hotel_booking
+      catalog: default_catalog
+      username: root
+      password: ""
+      threads: 1
+      query_timeout: 300
