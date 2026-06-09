@@ -354,4 +354,4 @@ Superset connection fails:
 Dashboard disappeared:
 
 - `docker compose down` keeps volumes.
-- `docker compose down -v` deletes volumes, including Superset metadata.
+- `docker compose down -v` deletes volumes, including all Superset metadata.
