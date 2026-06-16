@@ -1,0 +1,109 @@
+[2026-06-12T11:19:46.258+0000] {local_task_job_runner.py:123} INFO - ::group::Pre task execution logs
+[2026-06-12T11:19:46.732+0000] {taskinstance.py:2614} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: hotel_booking_pipeline.precheck.profile_dataset manual__2026-06-12T10:29:13+00:00 [queued]>
+[2026-06-12T11:19:46.798+0000] {taskinstance.py:2614} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: hotel_booking_pipeline.precheck.profile_dataset manual__2026-06-12T10:29:13+00:00 [queued]>
+[2026-06-12T11:19:46.807+0000] {taskinstance.py:2867} INFO - Starting attempt 2 of 3
+[2026-06-12T11:19:46.856+0000] {taskinstance.py:2890} INFO - Executing <Task(BashOperator): precheck.profile_dataset> on 2026-06-12 10:29:13+00:00
+[2026-06-12T11:19:46.977+0000] {logging_mixin.py:190} WARNING - /home/***/.local/lib/python3.12/site-packages/***/task/task_runner/standard_task_runner.py:70 DeprecationWarning: This process (pid=773) is multi-threaded, use of fork() may lead to deadlocks in the child.
+[2026-06-12T11:19:46.988+0000] {standard_task_runner.py:72} INFO - Started process 778 to run task
+[2026-06-12T11:19:46.979+0000] {standard_task_runner.py:104} INFO - Running: ['***', 'tasks', 'run', 'hotel_booking_pipeline', 'precheck.profile_dataset', 'manual__2026-06-12T10:29:13+00:00', '--job-id', '34', '--raw', '--subdir', 'DAGS_FOLDER/hotel_booking_pipeline.py', '--cfg-path', '/tmp/tmp1vyk_p2a']
+[2026-06-12T11:19:47.024+0000] {standard_task_runner.py:105} INFO - Job 34: Subtask precheck.profile_dataset
+[2026-06-12T11:19:48.298+0000] {task_command.py:467} INFO - Running <TaskInstance: hotel_booking_pipeline.precheck.profile_dataset manual__2026-06-12T10:29:13+00:00 [running]> on host d474afbfc391
+[2026-06-12T11:19:48.614+0000] {taskinstance.py:3134} INFO - Exporting env vars: AIRFLOW_CTX_DAG_OWNER='data-platform' AIRFLOW_CTX_DAG_ID='hotel_booking_pipeline' AIRFLOW_CTX_TASK_ID='precheck.profile_dataset' AIRFLOW_CTX_EXECUTION_DATE='2026-06-12T10:29:13+00:00' AIRFLOW_CTX_TRY_NUMBER='2' AIRFLOW_CTX_DAG_RUN_ID='manual__2026-06-12T10:29:13+00:00'
+[2026-06-12T11:19:48.615+0000] {taskinstance.py:732} INFO - ::endgroup::
+[2026-06-12T11:19:48.635+0000] {subprocess.py:78} INFO - Tmp dir root location: /tmp
+[2026-06-12T11:19:48.638+0000] {subprocess.py:88} INFO - Running command: ['/usr/bin/bash', '-c', 'python /opt/***/scripts/profile_dataset.py']
+[2026-06-12T11:19:48.662+0000] {subprocess.py:99} INFO - Output:
+[2026-06-12T11:19:50.931+0000] {subprocess.py:106} INFO - Dataset: /opt/***/data/input/hotel_bookings.csv
+[2026-06-12T11:19:50.936+0000] {subprocess.py:106} INFO - So dong (rows): 119,390
+[2026-06-12T11:19:50.937+0000] {subprocess.py:106} INFO - So cot (columns): 32
+[2026-06-12T11:19:50.939+0000] {subprocess.py:106} INFO - 
+[2026-06-12T11:19:50.940+0000] {subprocess.py:106} INFO - Columns va inferred dtypes:
+[2026-06-12T11:19:50.940+0000] {subprocess.py:106} INFO - - hotel: string
+[2026-06-12T11:19:50.940+0000] {subprocess.py:106} INFO - - is_canceled: integer
+[2026-06-12T11:19:50.940+0000] {subprocess.py:106} INFO - - lead_time: integer
+[2026-06-12T11:19:50.940+0000] {subprocess.py:106} INFO - - arrival_date_year: integer
+[2026-06-12T11:19:50.940+0000] {subprocess.py:106} INFO - - arrival_date_month: string
+[2026-06-12T11:19:50.940+0000] {subprocess.py:106} INFO - - arrival_date_week_number: integer
+[2026-06-12T11:19:50.941+0000] {subprocess.py:106} INFO - - arrival_date_day_of_month: integer
+[2026-06-12T11:19:50.942+0000] {subprocess.py:106} INFO - - stays_in_weekend_nights: integer
+[2026-06-12T11:19:50.943+0000] {subprocess.py:106} INFO - - stays_in_week_nights: integer
+[2026-06-12T11:19:50.943+0000] {subprocess.py:106} INFO - - adults: integer
+[2026-06-12T11:19:50.943+0000] {subprocess.py:106} INFO - - children: integer
+[2026-06-12T11:19:50.944+0000] {subprocess.py:106} INFO - - babies: integer
+[2026-06-12T11:19:50.944+0000] {subprocess.py:106} INFO - - meal: string
+[2026-06-12T11:19:50.944+0000] {subprocess.py:106} INFO - - country: string
+[2026-06-12T11:19:50.944+0000] {subprocess.py:106} INFO - - market_segment: string
+[2026-06-12T11:19:50.945+0000] {subprocess.py:106} INFO - - distribution_channel: string
+[2026-06-12T11:19:50.945+0000] {subprocess.py:106} INFO - - is_repeated_guest: integer
+[2026-06-12T11:19:50.946+0000] {subprocess.py:106} INFO - - previous_cancellations: integer
+[2026-06-12T11:19:50.946+0000] {subprocess.py:106} INFO - - previous_bookings_not_canceled: integer
+[2026-06-12T11:19:50.946+0000] {subprocess.py:106} INFO - - reserved_room_type: string
+[2026-06-12T11:19:50.946+0000] {subprocess.py:106} INFO - - assigned_room_type: string
+[2026-06-12T11:19:50.946+0000] {subprocess.py:106} INFO - - booking_changes: integer
+[2026-06-12T11:19:50.946+0000] {subprocess.py:106} INFO - - deposit_type: string
+[2026-06-12T11:19:50.946+0000] {subprocess.py:106} INFO - - agent: integer
+[2026-06-12T11:19:50.946+0000] {subprocess.py:106} INFO - - company: integer
+[2026-06-12T11:19:50.946+0000] {subprocess.py:106} INFO - - days_in_waiting_list: integer
+[2026-06-12T11:19:50.946+0000] {subprocess.py:106} INFO - - customer_type: string
+[2026-06-12T11:19:50.947+0000] {subprocess.py:106} INFO - - adr: decimal
+[2026-06-12T11:19:50.947+0000] {subprocess.py:106} INFO - - required_car_parking_spaces: integer
+[2026-06-12T11:19:50.947+0000] {subprocess.py:106} INFO - - total_of_special_requests: integer
+[2026-06-12T11:19:50.947+0000] {subprocess.py:106} INFO - - reservation_status: string
+[2026-06-12T11:19:50.947+0000] {subprocess.py:106} INFO - - reservation_status_date: date
+[2026-06-12T11:19:50.947+0000] {subprocess.py:106} INFO - 
+[2026-06-12T11:19:50.947+0000] {subprocess.py:106} INFO - Missing values theo column:
+[2026-06-12T11:19:50.947+0000] {subprocess.py:106} INFO - - hotel: 0
+[2026-06-12T11:19:50.947+0000] {subprocess.py:106} INFO - - is_canceled: 0
+[2026-06-12T11:19:50.947+0000] {subprocess.py:106} INFO - - lead_time: 0
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - arrival_date_year: 0
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - arrival_date_month: 0
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - arrival_date_week_number: 0
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - arrival_date_day_of_month: 0
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - stays_in_weekend_nights: 0
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - stays_in_week_nights: 0
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - adults: 0
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - children: 4
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - babies: 0
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - meal: 0
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - country: 488
+[2026-06-12T11:19:50.948+0000] {subprocess.py:106} INFO - - market_segment: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - distribution_channel: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - is_repeated_guest: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - previous_cancellations: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - previous_bookings_not_canceled: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - reserved_room_type: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - assigned_room_type: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - booking_changes: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - deposit_type: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - agent: 16,340
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - company: 112,593
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - days_in_waiting_list: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - customer_type: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - adr: 0
+[2026-06-12T11:19:50.949+0000] {subprocess.py:106} INFO - - required_car_parking_spaces: 0
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - - total_of_special_requests: 0
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - - reservation_status: 0
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - - reservation_status_date: 0
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - 
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - ADR:
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - - min: -6.38
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - - max: 5,400.00
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - - mean: 101.83
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - - IQR lower bound: -15.77
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - - IQR upper bound: 211.06
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - - possible outliers: 3,793
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - 
+[2026-06-12T11:19:50.950+0000] {subprocess.py:106} INFO - Kiem tra derived metrics:
+[2026-06-12T11:19:50.951+0000] {subprocess.py:106} INFO - - zero-night bookings: 715
+[2026-06-12T11:19:50.951+0000] {subprocess.py:106} INFO - - zero-guest bookings: 180
+[2026-06-12T11:19:50.951+0000] {subprocess.py:106} INFO - - rows skipped do invalid metric fields: 0
+[2026-06-12T11:19:50.951+0000] {subprocess.py:106} INFO - - estimated_revenue total: 42,723,497.53
+[2026-06-12T11:19:50.951+0000] {subprocess.py:106} INFO - - realized_revenue total: 25,996,260.41
+[2026-06-12T11:19:50.951+0000] {subprocess.py:106} INFO - 
+[2026-06-12T11:19:50.951+0000] {subprocess.py:106} INFO - Da ghi summary: /opt/***/docs/data_profile_summary.md
+[2026-06-12T11:19:50.951+0000] {subprocess.py:110} INFO - Command exited with return code 0
+[2026-06-12T11:19:50.986+0000] {taskinstance.py:341} INFO - ::group::Post task execution logs
+[2026-06-12T11:19:50.986+0000] {taskinstance.py:353} INFO - Marking task as SUCCESS. dag_id=hotel_booking_pipeline, task_id=precheck.profile_dataset, run_id=manual__2026-06-12T10:29:13+00:00, execution_date=20260612T102913, start_date=20260612T111946, end_date=20260612T111950
+[2026-06-12T11:19:51.073+0000] {local_task_job_runner.py:266} INFO - Task exited with return code 0
+[2026-06-12T11:19:51.128+0000] {taskinstance.py:3901} INFO - 1 downstream tasks scheduled from follow-on schedule check
+[2026-06-12T11:19:51.129+0000] {local_task_job_runner.py:245} INFO - ::endgroup::

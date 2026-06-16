@@ -3,15 +3,24 @@
     
 
   create table `hotel_booking`.`fact_bookings__dbt_tmp`
-      DUPLICATE KEY (booking_id)
-    DISTRIBUTED BY HASH (booking_id)BUCKETS 16
+      PRIMARY KEY (booking_key)
+    DISTRIBUTED BY HASH (booking_key)BUCKETS 16
     PROPERTIES (
       "replication_num" = "1"
     )
   as 
 
 SELECT
+    booking_key,
     booking_id,
+    source_dataset,
+    original_source_row_number,
+    first_seen_batch_id,
+    first_seen_batch_sequence,
+    valid_from,
+    valid_to,
+    is_current,
+    record_hash,
     arrival_date,
     hotel,
     country,

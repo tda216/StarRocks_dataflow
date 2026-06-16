@@ -1,7 +1,16 @@
 
 
 SELECT
+    booking_key,
     booking_id,
+    source_dataset,
+    original_source_row_number,
+    first_seen_batch_id,
+    first_seen_batch_sequence,
+    valid_from,
+    valid_to,
+    is_current,
+    record_hash,
     arrival_date,
     hotel,
     country,

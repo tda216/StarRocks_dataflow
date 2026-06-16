@@ -1,9 +1,67 @@
 version: 2
 
 models:
-  - name: stg_hotel_bookings
-    description: Cleaned and typed staging model from raw_hotel_bookings.
+  - name: stg_iceberg_raw_hotel_bookings
+    description: External Iceberg raw history exposed through StarRocks external catalog.
     columns:
+      - name: booking_key
+        description: Stable synthetic key persisted by the batch generator.
+        tests:
+          - not_null
+      - name: batch_id
+        tests:
+          - not_null
+      - name: batch_sequence
+        tests:
+          - not_null
+      - name: batch_effective_at
+        tests:
+          - not_null
+      - name: record_hash
+        description: Hash of normalized business columns only.
+        tests:
+          - not_null
+
+  - name: int_hotel_bookings_deduped
+    description: Exact duplicate removal by booking_key, batch_id, and record_hash.
+    columns:
+      - name: booking_key
+        tests:
+          - not_null
+      - name: batch_id
+        tests:
+          - not_null
+      - name: record_hash
+        tests:
+          - not_null
+
+  - name: scd_hotel_bookings
+    description: SCD Type 2 history built from change records.
+    columns:
+      - name: booking_key
+        tests:
+          - not_null
+      - name: valid_from
+        tests:
+          - not_null
+      - name: is_current
+        tests:
+          - not_null
+          - accepted_values:
+              values: [0, 1]
+              quote: false
+      - name: record_hash
+        tests:
+          - not_null
+
+  - name: stg_hotel_bookings
+    description: Cleaned and typed current booking state from the SCD2 model.
+    columns:
+      - name: booking_key
+        description: Stable booking key from generated batches.
+        tests:
+          - not_null
+          - unique
       - name: hotel
         description: Hotel type.
         tests:
@@ -22,8 +80,13 @@ models:
   - name: int_booking_metrics
     description: Booking-level model with derived metrics and analysis buckets.
     columns:
+      - name: booking_key
+        description: Stable booking key used by SCD2/current/fact models.
+        tests:
+          - not_null
+          - unique
       - name: booking_id
-        description: Deterministic hash key generated from booking attributes.
+        description: Backward-compatible alias of booking_key for existing marts/charts.
         tests:
           - not_null
       - name: total_nights
@@ -48,6 +111,10 @@ models:
     tests:
       - not_empty
     columns:
+      - name: booking_key
+        tests:
+          - not_null
+          - unique
       - name: booking_id
         tests:
           - not_null

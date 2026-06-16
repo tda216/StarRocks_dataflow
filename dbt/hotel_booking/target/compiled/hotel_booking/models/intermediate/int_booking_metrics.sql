@@ -4,18 +4,16 @@ WITH bookings AS (
     SELECT * FROM `hotel_booking`.`stg_hotel_bookings`
 )
 SELECT
-    MD5(CONCAT(
-        COALESCE(hotel, ''), '|',
-        COALESCE(CAST(arrival_date AS VARCHAR), ''), '|',
-        COALESCE(country, ''), '|',
-        COALESCE(market_segment, ''), '|',
-        COALESCE(distribution_channel, ''), '|',
-        COALESCE(reserved_room_type, ''), '|',
-        COALESCE(assigned_room_type, ''), '|',
-        COALESCE(CAST(lead_time AS VARCHAR), ''), '|',
-        COALESCE(CAST(adr AS VARCHAR), ''), '|',
-        COALESCE(CAST(loaded_at AS VARCHAR), '')
-    )) AS booking_id,
+    booking_key,
+    booking_key AS booking_id,
+    source_dataset,
+    original_source_row_number,
+    first_seen_batch_id,
+    first_seen_batch_sequence,
+    valid_from,
+    valid_to,
+    is_current,
+    record_hash,
     hotel,
     arrival_date,
     arrival_date_year,
@@ -80,6 +78,6 @@ SELECT
         WHEN COALESCE(adults, 0) = 2 AND COALESCE(children, 0) + COALESCE(babies, 0) = 0 THEN 'couple'
         ELSE 'family/group'
     END AS guest_type,
-    source_file,
-    loaded_at
+    source_object_path AS source_file,
+    ingested_at AS loaded_at
 FROM bookings

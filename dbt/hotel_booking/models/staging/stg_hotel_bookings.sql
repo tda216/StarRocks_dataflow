@@ -1,15 +1,36 @@
 {{ config(
     materialized='table',
     engine='OLAP',
-    table_type='DUPLICATE',
-    keys=['hotel'],
-    distributed_by=['hotel'],
-    buckets=8,
+    table_type='PRIMARY',
+    keys=['booking_key'],
+    distributed_by=['booking_key'],
+    buckets=16,
     properties={'replication_num': '1'}
 ) }}
 
-WITH raw AS (
+WITH current_scd AS (
+    SELECT *
+    FROM {{ ref('scd_hotel_bookings') }}
+    WHERE is_current = 1
+),
+cleaned AS (
     SELECT
+        booking_key,
+        source_dataset,
+        original_source_row_number,
+        first_seen_batch_id,
+        first_seen_batch_sequence,
+        batch_effective_at,
+        valid_from,
+        valid_to,
+        is_current,
+        record_hash,
+        source_file_name,
+        source_object_path,
+        file_hash,
+        ingested_at,
+        row_ingestion_id,
+        synthetic_operation,
         NULLIF(NULLIF(TRIM(hotel), ''), 'NULL') AS hotel,
         NULLIF(NULLIF(TRIM(is_canceled), ''), 'NULL') AS is_canceled,
         NULLIF(NULLIF(TRIM(lead_time), ''), 'NULL') AS lead_time,
@@ -41,13 +62,27 @@ WITH raw AS (
         NULLIF(NULLIF(TRIM(required_car_parking_spaces), ''), 'NULL') AS required_car_parking_spaces,
         NULLIF(NULLIF(TRIM(total_of_special_requests), ''), 'NULL') AS total_of_special_requests,
         NULLIF(NULLIF(TRIM(reservation_status), ''), 'NULL') AS reservation_status,
-        NULLIF(NULLIF(TRIM(reservation_status_date), ''), 'NULL') AS reservation_status_date,
-        source_file,
-        loaded_at
-    FROM {{ source('raw', 'raw_hotel_bookings') }}
+        NULLIF(NULLIF(TRIM(reservation_status_date), ''), 'NULL') AS reservation_status_date
+    FROM current_scd
 ),
 typed AS (
     SELECT
+        booking_key,
+        source_dataset,
+        original_source_row_number,
+        first_seen_batch_id,
+        first_seen_batch_sequence,
+        batch_effective_at,
+        valid_from,
+        valid_to,
+        is_current,
+        record_hash,
+        source_file_name,
+        source_object_path,
+        file_hash,
+        ingested_at,
+        row_ingestion_id,
+        synthetic_operation,
         hotel,
         CAST(is_canceled AS INT) AS is_canceled,
         CAST(lead_time AS INT) AS lead_time,
@@ -93,10 +128,8 @@ typed AS (
         CAST(required_car_parking_spaces AS INT) AS required_car_parking_spaces,
         CAST(total_of_special_requests AS INT) AS total_of_special_requests,
         COALESCE(reservation_status, 'Unknown') AS reservation_status,
-        CAST(reservation_status_date AS DATE) AS reservation_status_date,
-        source_file,
-        loaded_at
-    FROM raw
+        CAST(reservation_status_date AS DATE) AS reservation_status_date
+    FROM cleaned
 )
 SELECT
     *,

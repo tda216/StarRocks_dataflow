@@ -1,15 +1,24 @@
 {{ config(
     materialized='table',
     engine='OLAP',
-    table_type='DUPLICATE',
-    keys=['booking_id'],
-    distributed_by=['booking_id'],
+    table_type='PRIMARY',
+    keys=['booking_key'],
+    distributed_by=['booking_key'],
     buckets=16,
     properties={'replication_num': '1'}
 ) }}
 
 SELECT
+    booking_key,
     booking_id,
+    source_dataset,
+    original_source_row_number,
+    first_seen_batch_id,
+    first_seen_batch_sequence,
+    valid_from,
+    valid_to,
+    is_current,
+    record_hash,
     arrival_date,
     hotel,
     country,

@@ -1,0 +1,35 @@
+[2026-06-12T11:39:42.278+0000] {local_task_job_runner.py:123} INFO - ::group::Pre task execution logs
+[2026-06-12T11:39:42.345+0000] {taskinstance.py:2614} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: hotel_booking_pipeline.validation.log_validation_counts manual__2026-06-12T11:27:50.193033+00:00 [queued]>
+[2026-06-12T11:39:42.363+0000] {taskinstance.py:2614} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: hotel_booking_pipeline.validation.log_validation_counts manual__2026-06-12T11:27:50.193033+00:00 [queued]>
+[2026-06-12T11:39:42.363+0000] {taskinstance.py:2867} INFO - Starting attempt 1 of 2
+[2026-06-12T11:39:42.390+0000] {taskinstance.py:2890} INFO - Executing <Task(PythonOperator): validation.log_validation_counts> on 2026-06-12 11:27:50.193033+00:00
+[2026-06-12T11:39:42.402+0000] {standard_task_runner.py:104} INFO - Running: ['***', 'tasks', 'run', 'hotel_booking_pipeline', 'validation.log_validation_counts', 'manual__2026-06-12T11:27:50.193033+00:00', '--job-id', '88', '--raw', '--subdir', 'DAGS_FOLDER/hotel_booking_pipeline.py', '--cfg-path', '/tmp/tmp_vmv84n9']
+[2026-06-12T11:39:42.409+0000] {standard_task_runner.py:105} INFO - Job 88: Subtask validation.log_validation_counts
+[2026-06-12T11:39:42.419+0000] {logging_mixin.py:190} WARNING - /home/***/.local/lib/python3.12/site-packages/***/task/task_runner/standard_task_runner.py:70 DeprecationWarning: This process (pid=2100) is multi-threaded, use of fork() may lead to deadlocks in the child.
+[2026-06-12T11:39:42.421+0000] {standard_task_runner.py:72} INFO - Started process 2101 to run task
+[2026-06-12T11:39:42.524+0000] {task_command.py:467} INFO - Running <TaskInstance: hotel_booking_pipeline.validation.log_validation_counts manual__2026-06-12T11:27:50.193033+00:00 [running]> on host d474afbfc391
+[2026-06-12T11:39:42.689+0000] {taskinstance.py:3134} INFO - Exporting env vars: AIRFLOW_CTX_DAG_OWNER='data-platform' AIRFLOW_CTX_DAG_ID='hotel_booking_pipeline' AIRFLOW_CTX_TASK_ID='validation.log_validation_counts' AIRFLOW_CTX_EXECUTION_DATE='2026-06-12T11:27:50.193033+00:00' AIRFLOW_CTX_TRY_NUMBER='1' AIRFLOW_CTX_DAG_RUN_ID='manual__2026-06-12T11:27:50.193033+00:00'
+[2026-06-12T11:39:42.691+0000] {taskinstance.py:732} INFO - ::endgroup::
+[2026-06-12T11:39:42.904+0000] {logging_mixin.py:190} INFO - scd_hotel_bookings: 119,405 rows
+[2026-06-12T11:39:42.941+0000] {logging_mixin.py:190} INFO - stg_hotel_bookings: 119,395 rows
+[2026-06-12T11:39:42.969+0000] {logging_mixin.py:190} INFO - int_booking_metrics: 119,395 rows
+[2026-06-12T11:39:42.991+0000] {logging_mixin.py:190} INFO - fact_bookings: 119,395 rows
+[2026-06-12T11:39:43.016+0000] {logging_mixin.py:190} INFO - mart_daily_booking_revenue: 793 rows
+[2026-06-12T11:39:43.031+0000] {logging_mixin.py:190} INFO - mart_monthly_booking_revenue: 26 rows
+[2026-06-12T11:39:43.038+0000] {logging_mixin.py:190} INFO - mart_hotel_performance: 2 rows
+[2026-06-12T11:39:43.047+0000] {logging_mixin.py:190} INFO - mart_room_performance: 75 rows
+[2026-06-12T11:39:43.065+0000] {logging_mixin.py:190} INFO - mart_market_segment_performance: 8 rows
+[2026-06-12T11:39:43.078+0000] {logging_mixin.py:190} INFO - mart_channel_performance: 5 rows
+[2026-06-12T11:39:43.088+0000] {logging_mixin.py:190} INFO - mart_country_performance: 178 rows
+[2026-06-12T11:39:43.099+0000] {logging_mixin.py:190} INFO - mart_cancellation_analysis: 256 rows
+[2026-06-12T11:39:43.106+0000] {logging_mixin.py:190} INFO - mart_lead_time_analysis: 5 rows
+[2026-06-12T11:39:43.116+0000] {logging_mixin.py:190} INFO - mart_customer_type_performance: 16 rows
+[2026-06-12T11:39:43.209+0000] {logging_mixin.py:190} INFO - booking_keys with duplicate current versions: 0
+[2026-06-12T11:39:45.708+0000] {logging_mixin.py:190} INFO - booking_key + batch_id groups with multiple record_hash values: 0
+[2026-06-12T11:39:47.478+0000] {logging_mixin.py:190} INFO - SCD2 overlapping period check rows: 0
+[2026-06-12T11:39:47.512+0000] {python.py:240} INFO - Done. Returned value was: None
+[2026-06-12T11:39:47.777+0000] {taskinstance.py:341} INFO - ::group::Post task execution logs
+[2026-06-12T11:39:47.782+0000] {taskinstance.py:353} INFO - Marking task as SUCCESS. dag_id=hotel_booking_pipeline, task_id=validation.log_validation_counts, run_id=manual__2026-06-12T11:27:50.193033+00:00, execution_date=20260612T112750, start_date=20260612T113942, end_date=20260612T113947
+[2026-06-12T11:39:48.240+0000] {local_task_job_runner.py:266} INFO - Task exited with return code 0
+[2026-06-12T11:39:48.389+0000] {taskinstance.py:3901} INFO - 0 downstream tasks scheduled from follow-on schedule check
+[2026-06-12T11:39:48.392+0000] {local_task_job_runner.py:245} INFO - ::endgroup::

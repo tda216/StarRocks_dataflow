@@ -5,7 +5,7 @@
 - Dataset name: Hotel Booking Demand
 - Expected file: `data/input/hotel_bookings.csv`
 - Grain: one row per hotel booking record
-- Source type: local CSV
+- Source type: local CSV converted into deterministic incremental batch CSVs for the MVP demo
 
 ## Why This Dataset Fits the Hospitality BI Case
 
@@ -61,22 +61,74 @@ Dataset không có real cost/expense, nên đây không phải true PNL dataset.
 | `reservation_status` | Final reservation status | Ví dụ `Check-Out`, `Canceled`, `No-Show`. |
 | `reservation_status_date` | Status date | Cast thành DATE. |
 
-## Raw Table
+## Synthetic Batch Metadata
 
-Raw table:
+Generated batch files are written to:
 
 ```text
-hotel_booking.raw_hotel_bookings
+data/input/incremental_batches/
 ```
 
-Raw table giữ đa số source columns dạng `VARCHAR` để CSV loading robust. Type casting và cleaning thực hiện trong `stg_hotel_bookings`.
+Stable key:
+
+```text
+booking_key = source_dataset + ':' + original_source_row_number
+```
+
+`booking_key` is generated once by `scripts/generate_synthetic_batches.py` and persisted in every generated batch. Spark must not regenerate it from row number.
 
 Metadata columns:
 
 | Column | Meaning |
 | --- | --- |
-| `source_file` | Raw object path, ví dụ `s3://hotel-booking-raw/hotel_booking_demand/hotel_bookings.csv`. |
-| `loaded_at` | Timestamp khi row được load vào StarRocks. |
+| `source_dataset` | Logical dataset name, currently `hotel_booking_demand`. |
+| `original_source_row_number` | Stable row number from the original Kaggle CSV. |
+| `booking_key` | Stable synthetic key for this POC. |
+| `batch_id` | Deterministic batch identifier, for example `batch_001_initial`. |
+| `batch_sequence` | Numeric batch order for SCD2. |
+| `batch_effective_at` | Deterministic effective timestamp used as SCD2 `valid_from`. |
+| `batch_row_number` | Row order inside the generated batch file. |
+| `synthetic_operation` | Demo label such as `initial`, `update`, `duplicate_replay`, or fixture operation. |
+
+## Iceberg Raw History
+
+Iceberg table:
+
+```text
+iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history
+```
+
+Spark appends generated batch CSVs to this Iceberg table. Iceberg manages the table and stores data in Parquet under the MinIO `warehouse` bucket.
+
+Additional ingestion metadata:
+
+| Column | Meaning |
+| --- | --- |
+| `source_file_name` | Generated batch CSV filename. |
+| `source_object_path` | Raw MinIO object path for the batch file. |
+| `file_hash` | SHA-256 hash of the local batch file content. |
+| `record_hash` | SHA-256 hash of normalized business columns only. |
+| `ingested_at` | Physical ingestion timestamp. Not used for SCD2 validity. |
+| `row_ingestion_id` | Deterministic row ingestion identifier. |
+
+`record_hash` excludes ingestion metadata and derived metrics. It is used by dbt to detect business changes.
+
+## SCD2 Fields
+
+SCD2 table:
+
+```text
+hotel_booking.scd_hotel_bookings
+```
+
+| Column | Meaning |
+| --- | --- |
+| `record_hash` | Business-only hash used consistently across raw history, dedup, SCD2, current, and fact models. |
+| `valid_from` | Equal to deterministic `batch_effective_at`. |
+| `valid_to` | Next change record `valid_from`; `NULL` for current record. |
+| `is_current` | `1` for latest version per `booking_key`, else `0`. |
+| `first_seen_batch_id` | Batch that produced the SCD2 version. |
+| `first_seen_batch_sequence` | Sequence of the batch that produced the SCD2 version. |
 
 ## Cleaned Fields
 
@@ -100,7 +152,7 @@ Metadata columns:
 | `total_guests` | `adults + children + babies` | Missing children treated as `0`. |
 | `estimated_revenue` | `adr * total_nights` | Main MVP revenue estimate. |
 | `realized_revenue` | `estimated_revenue` when `is_cancelled = 0`, else `0` | Revenue after cancellation. |
-| `cancellation_rate` | cancelled bookings / total bookings | Calculated in mart tables. |
+| `cancellation_rate` | cancelled bookings / total bookings | For aggregated dashboards, use weighted formula `SUM(cancelled_bookings) / SUM(bookings)` or `SUM(cancelled_bookings) / SUM(total_bookings)`, not `AVG(cancellation_rate)`. |
 | `average_adr` / `avg_adr` | average of cleaned `adr` | Name differs by mart table. |
 | `lead_time_bucket` | bucket from `lead_time` | `0-7 days`, `8-30 days`, `31-90 days`, `91-180 days`, `180+ days`. |
 | `stay_length_bucket` | bucket from `total_nights` | `0 night`, `1-2 nights`, `3-5 nights`, `6-10 nights`, `10+ nights`. |

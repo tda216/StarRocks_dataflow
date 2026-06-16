@@ -4,7 +4,7 @@ FROM apache/airflow:${AIRFLOW_VERSION}
 USER root
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git openjdk-17-jre-headless procps \
     && rm -rf /var/lib/apt/lists/*
 
 USER airflow

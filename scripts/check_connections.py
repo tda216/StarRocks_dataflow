@@ -96,6 +96,7 @@ def main() -> int:
 
     check_url("Airflow UI", f"http://localhost:{env('AIRFLOW_WEB_PORT', '8080')}/health")
     check_url("Superset UI", f"http://localhost:{env('SUPERSET_PORT', '8088')}/health")
+    check_url("Iceberg REST", f"http://localhost:{env('ICEBERG_REST_PORT', '8181')}/v1/config")
 
     return 1 if failed else 0
 

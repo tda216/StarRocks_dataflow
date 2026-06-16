@@ -1,12 +1,14 @@
 # Superset Dashboard Guide
 
-Guide này hướng dẫn build dashboard thủ công trên Superset cho local MVP:
+Guide này hướng dẫn tạo dashboard Superset cho local MVP:
 
 ```text
 StarRocks mart tables -> Superset datasets -> Hotel Booking BI Dashboard
 ```
 
 Không dùng raw/staging/intermediate tables cho dashboard charts.
+
+Khuyến nghị cho demo: dùng bootstrap script để tạo nhanh database connection, datasets, charts, và dashboard. Sau đó chỉ chỉnh layout/filter thủ công nếu cần.
 
 ## 1. Mở Superset
 
@@ -28,12 +30,49 @@ Default login:
 admin / admin
 ```
 
-## 2. Verify StarRocks SQLAlchemy Support
+## 2. Tạo Dashboard Tự Động
 
-Superset image hiện cài:
+Điều kiện trước khi chạy:
 
-- `starrocks==1.3.3`
-- `mysqlclient==2.2.7`
+- Airflow DAG hoặc dbt manual run đã tạo mart tables trong StarRocks.
+- Superset service đang chạy.
+- Nếu vừa thêm mount `scripts/` vào Superset trong `docker-compose.yml`, recreate Superset một lần:
+
+```bash
+docker compose up -d superset
+```
+
+Chạy bootstrap script:
+
+```bash
+docker compose exec superset python /app/bootstrap_scripts/bootstrap_superset_dashboard.py
+```
+
+Script sẽ tạo/update idempotent:
+
+- Database connection: `StarRocks Hotel Booking`
+- 10 Superset datasets từ mart tables
+- 13 demo charts
+- Dashboard: `Hotel Booking BI Dashboard`
+
+Nếu container Superset chưa được recreate nên chưa thấy `/app/bootstrap_scripts`, dùng fallback:
+
+```bash
+docker compose cp scripts/bootstrap_superset_dashboard.py superset:/tmp/bootstrap_superset_dashboard.py
+docker compose exec superset python /tmp/bootstrap_superset_dashboard.py
+```
+
+Sau khi chạy xong, mở:
+
+```text
+http://localhost:8088/superset/dashboard/hotel-booking-bi-dashboard/
+```
+
+Bootstrap script chỉ dùng mart tables. Không tạo chart từ raw/staging/intermediate tables.
+
+## 3. Verify StarRocks SQLAlchemy Support
+
+Superset image installs the StarRocks SQLAlchemy package and MySQL client from `docker/superset/requirements.txt`. Do not assume a version from the docs; verify the actual installed versions in the container.
 
 Kiểm tra trong container:
 
@@ -52,9 +91,9 @@ docker compose build superset
 docker compose up -d superset
 ```
 
-## 3. Tạo StarRocks Database Connection
+## 4. Tạo StarRocks Database Connection Thủ Công
 
-Trong Superset UI:
+Nếu không dùng bootstrap script, tạo thủ công trong Superset UI:
 
 1. Vào `Settings` -> `Database Connections`.
 2. Chọn `+ Database`.
@@ -77,7 +116,7 @@ Test connection. Nếu pass, lưu connection với tên:
 StarRocks Hotel Booking
 ```
 
-## 4. Tạo Superset Datasets
+## 5. Tạo Superset Datasets Thủ Công
 
 Chỉ tạo datasets từ mart tables sau:
 
@@ -105,7 +144,8 @@ Trong Superset UI:
 
 Không tạo dataset từ:
 
-- `raw_hotel_bookings`
+- `raw_hotel_bookings_history`
+- `scd_hotel_bookings`
 - `stg_hotel_bookings`
 - `int_booking_metrics`
 - `fact_bookings`
@@ -113,7 +153,7 @@ Không tạo dataset từ:
 
 Ngoại lệ: `fact_bookings` chỉ dùng để validation/debug, không dùng làm dashboard chart source trong MVP này.
 
-## 5. Dashboard
+## 6. Dashboard
 
 Dashboard name:
 
@@ -130,7 +170,7 @@ Recommended layout:
 5. Country / Demand Analysis
 6. Cancellation / Lead Time Analysis
 
-## 6. Native Filters
+## 7. Native Filters
 
 Tạo native filters sau ở dashboard level:
 
@@ -194,8 +234,8 @@ Không dùng `Apply to all charts` cho mọi filter. Nhiều mart không có cù
 | Chart | Dataset | Chart Type | Metric | Dimension |
 | --- | --- | --- | --- | --- |
 | Total bookings | `mart_hotel_performance` | Big Number | `SUM(bookings)` | none |
-| Cancelled bookings | `mart_hotel_performance` | Big Number | `ROUND(SUM(bookings * cancellation_rate), 0)` | none |
-| Cancellation rate | `mart_hotel_performance` | Big Number | `SUM(bookings * cancellation_rate) / NULLIF(SUM(bookings), 0)` | none |
+| Cancelled bookings | `mart_hotel_performance` | Big Number | `SUM(cancelled_bookings)` | none |
+| Cancellation rate | `mart_hotel_performance` | Big Number | `SUM(cancelled_bookings) / NULLIF(SUM(bookings), 0)` | none |
 | Estimated revenue | `mart_hotel_performance` | Big Number | `SUM(estimated_revenue)` | none |
 | Realized revenue | `mart_hotel_performance` | Big Number | `SUM(realized_revenue)` | none |
 | Average ADR | `mart_hotel_performance` | Big Number | `AVG(avg_adr)` | none |
@@ -203,7 +243,7 @@ Không dùng `Apply to all charts` cho mọi filter. Nhiều mart không có cù
 Nếu Superset không nhận calculated metric trực tiếp, tạo metric custom bằng SQL expression trong chart:
 
 ```sql
-SUM(bookings * cancellation_rate) / NULLIF(SUM(bookings), 0)
+SUM(cancelled_bookings) / NULLIF(SUM(bookings), 0)
 ```
 
 ### B. Time Trends
@@ -221,7 +261,7 @@ SUM(bookings * cancellation_rate) / NULLIF(SUM(bookings), 0)
 | Revenue by hotel type | `mart_hotel_performance` | Bar Chart | `hotel` | `SUM(realized_revenue)` |
 | ADR by hotel type | `mart_hotel_performance` | Bar Chart | `hotel` | `AVG(avg_adr)` |
 | Revenue by room type | `mart_room_performance` | Bar Chart | `reserved_room_type` | `SUM(realized_revenue)` |
-| Cancellation rate by room type | `mart_room_performance` | Bar Chart | `reserved_room_type` | `AVG(cancellation_rate)` |
+| Cancellation rate by room type | `mart_room_performance` | Bar Chart | `reserved_room_type` | `SUM(cancelled_bookings) / NULLIF(SUM(bookings), 0)` |
 
 ### D. Segment / Channel Analysis
 
@@ -229,8 +269,8 @@ SUM(bookings * cancellation_rate) / NULLIF(SUM(bookings), 0)
 | --- | --- | --- | --- | --- |
 | Revenue by market segment | `mart_market_segment_performance` | Bar Chart | `market_segment` | `SUM(realized_revenue)` |
 | Booking count by distribution channel | `mart_channel_performance` | Bar Chart | `distribution_channel` | `SUM(bookings)` |
-| Cancellation rate by distribution channel | `mart_channel_performance` | Bar Chart | `distribution_channel` | `AVG(cancellation_rate)` |
-| Customer type performance | `mart_customer_type_performance` | Table | `customer_type`, `guest_type` | `SUM(bookings)`, `SUM(realized_revenue)`, `AVG(cancellation_rate)` |
+| Cancellation rate by distribution channel | `mart_channel_performance` | Bar Chart | `distribution_channel` | `SUM(cancelled_bookings) / NULLIF(SUM(bookings), 0)` |
+| Customer type performance | `mart_customer_type_performance` | Table | `customer_type`, `guest_type` | `SUM(bookings)`, `SUM(realized_revenue)`, `SUM(cancelled_bookings) / NULLIF(SUM(bookings), 0)` |
 
 ### E. Country / Demand Analysis
 
@@ -245,7 +285,7 @@ Limit top country charts to top 10 or top 20.
 
 | Chart | Dataset | Chart Type | Dimension | Metrics |
 | --- | --- | --- | --- | --- |
-| Cancellation rate by lead time bucket | `mart_lead_time_analysis` | Bar Chart | `lead_time_bucket` | `AVG(cancellation_rate)` |
+| Cancellation rate by lead time bucket | `mart_lead_time_analysis` | Bar Chart | `lead_time_bucket` | `SUM(cancelled_bookings) / NULLIF(SUM(bookings), 0)` |
 | Cancellation by market segment/channel/deposit type | `mart_cancellation_analysis` | Table or Heatmap | `market_segment`, `distribution_channel`, `deposit_type` | `SUM(total_bookings)`, `SUM(cancelled_bookings)`, `SUM(cancelled_bookings) / NULLIF(SUM(total_bookings), 0)` |
 | Booking distribution by stay length | `mart_lead_time_analysis` | Bar Chart | `stay_length_bucket` if available | `SUM(bookings)` |
 
@@ -291,8 +331,8 @@ Check sample KPI:
 docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
 SELECT
   SUM(bookings) AS bookings,
-  ROUND(SUM(bookings * cancellation_rate), 0) AS cancelled_bookings,
-  SUM(bookings * cancellation_rate) / NULLIF(SUM(bookings), 0) AS cancellation_rate,
+  SUM(cancelled_bookings) AS cancelled_bookings,
+  SUM(cancelled_bookings) / NULLIF(SUM(bookings), 0) AS cancellation_rate,
   SUM(estimated_revenue) AS estimated_revenue,
   SUM(realized_revenue) AS realized_revenue,
   AVG(avg_adr) AS avg_adr

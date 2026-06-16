@@ -23,9 +23,25 @@ x-airflow-common: &airflow-common
     DBT_THREADS: "${DBT_THREADS:-1}"
     MINIO_ENDPOINT: "${MINIO_ENDPOINT:-minio:9000}"
     MINIO_BUCKET: "${MINIO_BUCKET:-hotel-booking-raw}"
+    MINIO_WAREHOUSE_BUCKET: "${MINIO_WAREHOUSE_BUCKET:-warehouse}"
+    MINIO_BATCH_PREFIX: "${MINIO_BATCH_PREFIX:-hotel_booking_demand/incremental_batches}"
     MINIO_ROOT_USER: "${MINIO_ROOT_USER:-minioadmin}"
     MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-minioadmin}"
     MINIO_RAW_OBJECT_KEY: "${MINIO_RAW_OBJECT_KEY:-hotel_booking_demand/hotel_bookings.csv}"
+    ICEBERG_REST_URI: "${ICEBERG_REST_URI:-http://iceberg-rest:8181}"
+    ICEBERG_CATALOG_NAME: "${ICEBERG_CATALOG_NAME:-iceberg_catalog}"
+    ICEBERG_DATABASE: "${ICEBERG_DATABASE:-hotel_booking_lakehouse}"
+    ICEBERG_RAW_HISTORY_TABLE: "${ICEBERG_RAW_HISTORY_TABLE:-raw_hotel_bookings_history}"
+    ICEBERG_WAREHOUSE: "${ICEBERG_WAREHOUSE:-s3://warehouse/}"
+    MINIO_ENDPOINT_URL: "${MINIO_ENDPOINT_URL:-http://minio:9000}"
+    AWS_REGION: "${AWS_REGION:-us-east-1}"
+    AWS_DEFAULT_REGION: "${AWS_DEFAULT_REGION:-us-east-1}"
+    AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER:-minioadmin}"
+    AWS_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+    SPARK_MASTER: "${SPARK_MASTER:-local[1]}"
+    SPARK_DRIVER_MEMORY: "${SPARK_DRIVER_MEMORY:-768m}"
+    SPARK_EXECUTOR_MEMORY: "${SPARK_EXECUTOR_MEMORY:-768m}"
+    SPARK_SQL_SHUFFLE_PARTITIONS: "${SPARK_SQL_SHUFFLE_PARTITIONS:-4}"
     STARROCKS_HOST: "${STARROCKS_HOST:-starrocks}"
     STARROCKS_QUERY_PORT: "${STARROCKS_QUERY_PORT:-9030}"
     STARROCKS_HTTP_PORT: "${STARROCKS_HTTP_PORT:-8030}"
@@ -33,7 +49,6 @@ x-airflow-common: &airflow-common
     STARROCKS_PASSWORD: "${STARROCKS_PASSWORD:-}"
     STARROCKS_CATALOG: "${STARROCKS_CATALOG:-default_catalog}"
     STARROCKS_DATABASE: "${STARROCKS_DATABASE:-hotel_booking}"
-    STARROCKS_RAW_TABLE: "${STARROCKS_RAW_TABLE:-raw_hotel_bookings}"
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/include:/opt/airflow/include
@@ -41,11 +56,14 @@ x-airflow-common: &airflow-common
     - ./data:/opt/airflow/data
     - ./docs:/opt/airflow/docs
     - ./scripts:/opt/airflow/scripts
+    - ./starrocks:/opt/airflow/starrocks
     - ./dbt:/opt/airflow/dbt
   networks:
     - data_network
-  mem_limit: 1g
-  mem_reservation: 512m
+  # Airflow also runs a local PySpark ingestion task in this MVP, so it needs
+  # a little more memory than a metadata-only scheduler/webserver.
+  mem_limit: 2g
+  mem_reservation: 768m
 
 services:
   minio:
@@ -54,13 +72,16 @@ services:
     environment:
       MINIO_ROOT_USER: "${MINIO_ROOT_USER:-minioadmin}"
       MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+      MINIO_DOMAIN: minio
     ports:
       - "9000:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
     networks:
-      - data_network
+      data_network:
+        aliases:
+          - warehouse.minio
     mem_limit: 512m
     mem_reservation: 256m
 
@@ -76,12 +97,35 @@ services:
       done;
       mc mb --ignore-existing local/${MINIO_BUCKET:-hotel-booking-raw};
       mc anonymous set none local/${MINIO_BUCKET:-hotel-booking-raw};
+      mc mb --ignore-existing local/${MINIO_WAREHOUSE_BUCKET:-warehouse};
+      mc anonymous set none local/${MINIO_WAREHOUSE_BUCKET:-warehouse};
       "
     networks:
       - data_network
     mem_limit: 128m
     mem_reservation: 64m
     restart: "no"
+
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:latest
+    depends_on:
+      - minio-init
+    environment:
+      AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER:-minioadmin}"
+      AWS_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: "s3://${MINIO_WAREHOUSE_BUCKET:-warehouse}/"
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    ports:
+      - "${ICEBERG_REST_PORT:-8181}:8181"
+    networks:
+      data_network:
+        aliases:
+          - iceberg-rest.minio
+    mem_limit: 512m
+    mem_reservation: 256m
 
   starrocks:
     image: starrocks/allin1-ubuntu:latest
@@ -178,6 +222,11 @@ services:
       SUPERSET_ADMIN_USERNAME: "${SUPERSET_ADMIN_USERNAME:-admin}"
       SUPERSET_ADMIN_PASSWORD: "${SUPERSET_ADMIN_PASSWORD:-admin}"
       SUPERSET_ADMIN_EMAIL: "${SUPERSET_ADMIN_EMAIL:-admin@example.com}"
+      SUPERSET_STARROCKS_SQLALCHEMY_URI: "${SUPERSET_STARROCKS_SQLALCHEMY_URI:-starrocks://root:@starrocks:9030/default_catalog.hotel_booking}"
+      SUPERSET_STARROCKS_DATABASE_NAME: "${SUPERSET_STARROCKS_DATABASE_NAME:-StarRocks Hotel Booking}"
+      SUPERSET_STARROCKS_SCHEMA: "${SUPERSET_STARROCKS_SCHEMA:-hotel_booking}"
+      SUPERSET_DASHBOARD_TITLE: "${SUPERSET_DASHBOARD_TITLE:-Hotel Booking BI Dashboard}"
+      SUPERSET_DASHBOARD_SLUG: "${SUPERSET_DASHBOARD_SLUG:-hotel-booking-bi-dashboard}"
     command:
       - /bin/sh
       - -c
@@ -195,6 +244,7 @@ services:
       - "${SUPERSET_PORT:-8088}:8088"
     volumes:
       - superset_home:/app/superset_home
+      - ./scripts:/app/bootstrap_scripts:ro
     depends_on:
       starrocks:
         condition: service_started
