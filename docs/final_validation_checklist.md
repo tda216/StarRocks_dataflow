@@ -185,7 +185,7 @@ SHOW TABLES FROM hotel_booking;
 Expected table groups:
 
 - `scd_hotel_bookings`
-- `stg_hotel_bookings`
+- `int_current_hotel_bookings`
 - `int_booking_metrics`
 - `dim_*`
 - `fact_bookings`

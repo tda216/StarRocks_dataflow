@@ -66,7 +66,7 @@ SCRIPT_ENV = {
 
 VALIDATION_TABLES = [
     "scd_hotel_bookings",
-    "stg_hotel_bookings",
+    "int_current_hotel_bookings",
     "int_booking_metrics",
     "fact_bookings",
     "mart_daily_booking_revenue",

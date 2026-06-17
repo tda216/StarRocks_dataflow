@@ -37,7 +37,7 @@ EXPECTED_INTERNAL_TABLES = [
     "stg_iceberg_raw_hotel_bookings",
     "int_hotel_bookings_deduped",
     "scd_hotel_bookings",
-    "stg_hotel_bookings",
+    "int_current_hotel_bookings",
     "int_booking_metrics",
     "fact_bookings",
     "dim_date",

@@ -54,7 +54,7 @@ models:
         tests:
           - not_null
 
-  - name: stg_hotel_bookings
+  - name: int_current_hotel_bookings
     description: Cleaned and typed current booking state from the SCD2 model.
     columns:
       - name: booking_key

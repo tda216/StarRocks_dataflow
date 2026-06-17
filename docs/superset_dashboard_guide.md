@@ -146,7 +146,7 @@ Không tạo dataset từ:
 
 - `raw_hotel_bookings_history`
 - `scd_hotel_bookings`
-- `stg_hotel_bookings`
+- `int_current_hotel_bookings`
 - `int_booking_metrics`
 - `fact_bookings`
 - `dim_*`

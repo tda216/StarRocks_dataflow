@@ -9,7 +9,7 @@
 ) }}
 
 WITH bookings AS (
-    SELECT * FROM {{ ref('stg_hotel_bookings') }}
+    SELECT * FROM {{ ref('int_current_hotel_bookings') }}
 )
 SELECT
     booking_key,

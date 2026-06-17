@@ -134,12 +134,12 @@ hotel_booking.scd_hotel_bookings
 
 | Field | Model | Definition |
 | --- | --- | --- |
-| `arrival_date` | `stg_hotel_bookings` | Date built from year, month name, and day of month. |
-| `country` | `stg_hotel_bookings` | Missing country becomes `Unknown`. |
-| `market_segment` | `stg_hotel_bookings` | Missing value becomes `Unknown`. |
-| `distribution_channel` | `stg_hotel_bookings` | Missing value becomes `Unknown`. |
-| `reserved_room_type` | `stg_hotel_bookings` | Missing value becomes `Unknown`. |
-| `assigned_room_type` | `stg_hotel_bookings` | Missing value becomes `Unknown`. |
+| `arrival_date` | `int_current_hotel_bookings` | Date built from year, month name, and day of month. |
+| `country` | `int_current_hotel_bookings` | Missing country becomes `Unknown`. |
+| `market_segment` | `int_current_hotel_bookings` | Missing value becomes `Unknown`. |
+| `distribution_channel` | `int_current_hotel_bookings` | Missing value becomes `Unknown`. |
+| `reserved_room_type` | `int_current_hotel_bookings` | Missing value becomes `Unknown`. |
+| `assigned_room_type` | `int_current_hotel_bookings` | Missing value becomes `Unknown`. |
 | `adr` | `int_booking_metrics` | Negative ADR is converted to `0` for metrics. Original value kept as `source_adr`. |
 | `is_cancelled` | `int_booking_metrics` | Clean integer cancellation flag. |
 | `guest_type` | `int_booking_metrics` | Derived as `solo`, `couple`, `family/group`, or `unknown`. |

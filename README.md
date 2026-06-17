@@ -471,7 +471,7 @@ Dashboard charts should query mart datasets only, not raw/staging/intermediate t
 | `stg_iceberg_raw_hotel_bookings` | StarRocks view over external Iceberg table | View, no table type |
 | `int_hotel_bookings_deduped` | StarRocks internal dbt table | `DUPLICATE KEY(booking_key, batch_id)` |
 | `scd_hotel_bookings` | StarRocks internal dbt table | `DUPLICATE KEY(booking_key, valid_from)` |
-| `stg_hotel_bookings` current model | StarRocks internal dbt table | `PRIMARY KEY(booking_key)` |
+| `int_current_hotel_bookings` current model | StarRocks internal dbt table | `PRIMARY KEY(booking_key)` |
 | `int_booking_metrics` | StarRocks internal dbt table | `PRIMARY KEY(booking_key)` |
 | `fact_bookings` | StarRocks internal dbt table | `PRIMARY KEY(booking_key)` |
 | `mart_*` tables | StarRocks internal dbt tables | `DUPLICATE KEY` for MVP |
