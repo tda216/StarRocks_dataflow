@@ -1,12 +1,21 @@
+WITH ordered_versions AS (
+    SELECT
+        booking_key,
+        valid_from,
+        valid_to,
+        LEAD(valid_from) OVER (
+            PARTITION BY booking_key
+            ORDER BY valid_from
+        ) AS next_valid_from
+    FROM {{ ref('int_hotel_booking_versions') }}
+)
+
 SELECT
-    a.booking_key,
-    a.valid_from AS a_valid_from,
-    a.valid_to AS a_valid_to,
-    b.valid_from AS b_valid_from,
-    b.valid_to AS b_valid_to
-FROM {{ ref('int_hotel_booking_versions') }} a
-JOIN {{ ref('int_hotel_booking_versions') }} b
-  ON a.booking_key = b.booking_key
- AND a.valid_from < COALESCE(b.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
- AND b.valid_from < COALESCE(a.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
- AND a.valid_from <> b.valid_from
+    booking_key,
+    valid_from,
+    valid_to,
+    next_valid_from
+FROM ordered_versions
+WHERE valid_to IS NOT NULL
+  AND next_valid_from IS NOT NULL
+  AND valid_to > next_valid_from

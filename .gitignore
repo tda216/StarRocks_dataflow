@@ -1,4 +1,34 @@
+# Environment & credentials
 .env
+.env.*
+!.env.example
+
+# IDEs & System files
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python Cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
 .venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+
+# Data directory
 data/
+
+# Airflow logs and database
+airflow/logs/
+airflow/airflow.db
+
+# dbt artifacts
+dbt/hotel_booking/target/
+dbt/hotel_booking/dbt_packages/
+dbt/hotel_booking/logs/
+dbt/hotel_booking/dbt_modules/
+dbt.log
