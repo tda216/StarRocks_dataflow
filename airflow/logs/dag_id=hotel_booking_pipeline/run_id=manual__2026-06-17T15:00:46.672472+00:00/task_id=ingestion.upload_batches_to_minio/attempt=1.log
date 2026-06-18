@@ -1,0 +1,26 @@
+[2026-06-17T15:01:03.051+0000] {local_task_job_runner.py:123} INFO - ::group::Pre task execution logs
+[2026-06-17T15:01:03.064+0000] {taskinstance.py:2614} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: hotel_booking_pipeline.ingestion.upload_batches_to_minio manual__2026-06-17T15:00:46.672472+00:00 [queued]>
+[2026-06-17T15:01:03.068+0000] {taskinstance.py:2614} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: hotel_booking_pipeline.ingestion.upload_batches_to_minio manual__2026-06-17T15:00:46.672472+00:00 [queued]>
+[2026-06-17T15:01:03.068+0000] {taskinstance.py:2867} INFO - Starting attempt 1 of 2
+[2026-06-17T15:01:03.074+0000] {taskinstance.py:2890} INFO - Executing <Task(BashOperator): ingestion.upload_batches_to_minio> on 2026-06-17 15:00:46.672472+00:00
+[2026-06-17T15:01:03.079+0000] {logging_mixin.py:190} WARNING - /home/***/.local/lib/python3.12/site-packages/***/task/task_runner/standard_task_runner.py:70 DeprecationWarning: This process (pid=5852) is multi-threaded, use of fork() may lead to deadlocks in the child.
+[2026-06-17T15:01:03.079+0000] {standard_task_runner.py:72} INFO - Started process 5853 to run task
+[2026-06-17T15:01:03.079+0000] {standard_task_runner.py:104} INFO - Running: ['***', 'tasks', 'run', 'hotel_booking_pipeline', 'ingestion.upload_batches_to_minio', 'manual__2026-06-17T15:00:46.672472+00:00', '--job-id', '126', '--raw', '--subdir', 'DAGS_FOLDER/hotel_booking_pipeline.py', '--cfg-path', '/tmp/tmphu0zl8q9']
+[2026-06-17T15:01:03.081+0000] {standard_task_runner.py:105} INFO - Job 126: Subtask ingestion.upload_batches_to_minio
+[2026-06-17T15:01:03.119+0000] {task_command.py:467} INFO - Running <TaskInstance: hotel_booking_pipeline.ingestion.upload_batches_to_minio manual__2026-06-17T15:00:46.672472+00:00 [running]> on host 5a05bbfd0b5c
+[2026-06-17T15:01:03.181+0000] {taskinstance.py:3134} INFO - Exporting env vars: AIRFLOW_CTX_DAG_OWNER='data-platform' AIRFLOW_CTX_DAG_ID='hotel_booking_pipeline' AIRFLOW_CTX_TASK_ID='ingestion.upload_batches_to_minio' AIRFLOW_CTX_EXECUTION_DATE='2026-06-17T15:00:46.672472+00:00' AIRFLOW_CTX_TRY_NUMBER='1' AIRFLOW_CTX_DAG_RUN_ID='manual__2026-06-17T15:00:46.672472+00:00'
+[2026-06-17T15:01:03.181+0000] {taskinstance.py:732} INFO - ::endgroup::
+[2026-06-17T15:01:03.188+0000] {subprocess.py:78} INFO - Tmp dir root location: /tmp
+[2026-06-17T15:01:03.190+0000] {subprocess.py:88} INFO - Running command: ['/usr/bin/bash', '-c', 'python /opt/***/scripts/upload_incremental_batches_to_minio.py']
+[2026-06-17T15:01:03.196+0000] {subprocess.py:99} INFO - Output:
+[2026-06-17T15:01:04.008+0000] {subprocess.py:106} INFO - Uploaded /opt/***/data/input/incremental_batches/batch_001_initial.csv -> s3://hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=01/watermark_date=20260101/raw_batch_sequence=001/batch_001_initial.csv (watermark_date=20260101, raw_batch_sequence=001)
+[2026-06-17T15:01:04.010+0000] {subprocess.py:106} INFO - Uploaded /opt/***/data/input/incremental_batches/batch_002_updates.csv -> s3://hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=02/watermark_date=20260102/raw_batch_sequence=002/batch_002_updates.csv (watermark_date=20260102, raw_batch_sequence=002)
+[2026-06-17T15:01:04.011+0000] {subprocess.py:106} INFO - Uploaded /opt/***/data/input/incremental_batches/batch_003_duplicate_replay.csv -> s3://hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=03/watermark_date=20260103/raw_batch_sequence=003/batch_003_duplicate_replay.csv (watermark_date=20260103, raw_batch_sequence=003)
+[2026-06-17T15:01:04.011+0000] {subprocess.py:106} INFO - Uploaded /opt/***/data/input/incremental_batches/batch_004_same_state.csv -> s3://hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=04/watermark_date=20260104/raw_batch_sequence=004/batch_004_same_state.csv (watermark_date=20260104, raw_batch_sequence=004)
+[2026-06-17T15:01:04.012+0000] {subprocess.py:106} INFO - Uploaded /opt/***/data/input/incremental_batches/batch_005_reverted_state.csv -> s3://hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=05/watermark_date=20260105/raw_batch_sequence=005/batch_005_reverted_state.csv (watermark_date=20260105, raw_batch_sequence=005)
+[2026-06-17T15:01:04.054+0000] {subprocess.py:110} INFO - Command exited with return code 0
+[2026-06-17T15:01:04.090+0000] {taskinstance.py:341} INFO - ::group::Post task execution logs
+[2026-06-17T15:01:04.091+0000] {taskinstance.py:353} INFO - Marking task as SUCCESS. dag_id=hotel_booking_pipeline, task_id=ingestion.upload_batches_to_minio, run_id=manual__2026-06-17T15:00:46.672472+00:00, execution_date=20260617T150046, start_date=20260617T150103, end_date=20260617T150104
+[2026-06-17T15:01:04.128+0000] {local_task_job_runner.py:266} INFO - Task exited with return code 0
+[2026-06-17T15:01:04.160+0000] {taskinstance.py:3901} INFO - 1 downstream tasks scheduled from follow-on schedule check
+[2026-06-17T15:01:04.162+0000] {local_task_job_runner.py:245} INFO - ::endgroup::

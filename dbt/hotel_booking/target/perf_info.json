@@ -1,0 +1,45 @@
+{
+    "path_count": 154,
+    "parsed_path_count": 6,
+    "static_analysis_path_count": 5,
+    "static_analysis_parsed_path_count": 0,
+    "is_partial_parse_enabled": true,
+    "is_static_analysis_enabled": true,
+    "read_files_elapsed": 0.03652049999800511,
+    "load_macros_elapsed": 0.00037312499989639036,
+    "parse_project_elapsed": 0.2977727089964901,
+    "patch_sources_elapsed": 5.207999492995441e-06,
+    "process_manifest_elapsed": 0.002386084001045674,
+    "load_all_elapsed": 0.46547329199893284,
+    "projects": [
+        {
+            "project_name": "hotel_booking",
+            "elapsed": 0.2976204170008714,
+            "parsers": [
+                {
+                    "parser": "model",
+                    "elapsed": 0.18480483299936168,
+                    "parsed_path_count": 5
+                },
+                {
+                    "parser": "test",
+                    "elapsed": 0.11280545900081052,
+                    "parsed_path_count": 1
+                }
+            ],
+            "parsed_path_count": 6
+        },
+        {
+            "project_name": "dbt_starrocks",
+            "elapsed": 0,
+            "parsers": [],
+            "parsed_path_count": 0
+        },
+        {
+            "project_name": "dbt",
+            "elapsed": 0,
+            "parsers": [],
+            "parsed_path_count": 0
+        }
+    ]
+}

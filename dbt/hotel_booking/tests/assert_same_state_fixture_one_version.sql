@@ -1,6 +1,6 @@
 WITH fixture AS (
     SELECT COUNT(*) AS version_count
-    FROM {{ ref('scd_hotel_bookings') }}
+    FROM {{ ref('int_hotel_booking_versions') }}
     WHERE booking_key = 'hotel_booking_demand:1'
 )
 SELECT version_count

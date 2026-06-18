@@ -41,6 +41,13 @@ ICEBERG_REST_URI = os.environ.get("ICEBERG_REST_URI", "http://iceberg-rest:8181"
 ICEBERG_CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "iceberg_catalog")
 ICEBERG_DATABASE = os.environ.get("ICEBERG_DATABASE", "hotel_booking_lakehouse")
 ICEBERG_RAW_HISTORY_TABLE = os.environ.get("ICEBERG_RAW_HISTORY_TABLE", "raw_hotel_bookings_history")
+ICEBERG_SILVER_DATABASE = os.environ.get("ICEBERG_SILVER_DATABASE", "hotel_booking_silver")
+ICEBERG_SILVER_TABLES = [
+    os.environ.get("ICEBERG_SILVER_DEDUPED_TABLE", "deduped_hotel_bookings"),
+    os.environ.get("ICEBERG_SILVER_VERSIONS_TABLE", "hotel_booking_versions"),
+    os.environ.get("ICEBERG_SILVER_CURRENT_TABLE", "current_hotel_bookings"),
+    os.environ.get("ICEBERG_SILVER_METRICS_TABLE", "booking_metrics"),
+]
 
 SCRIPT_ENV = {
     "MINIO_EXTERNAL_ENDPOINT": MINIO_ENDPOINT,
@@ -53,6 +60,11 @@ SCRIPT_ENV = {
     "ICEBERG_CATALOG_NAME": ICEBERG_CATALOG_NAME,
     "ICEBERG_DATABASE": ICEBERG_DATABASE,
     "ICEBERG_RAW_HISTORY_TABLE": ICEBERG_RAW_HISTORY_TABLE,
+    "ICEBERG_SILVER_DATABASE": ICEBERG_SILVER_DATABASE,
+    "ICEBERG_SILVER_DEDUPED_TABLE": os.environ.get("ICEBERG_SILVER_DEDUPED_TABLE", "deduped_hotel_bookings"),
+    "ICEBERG_SILVER_VERSIONS_TABLE": os.environ.get("ICEBERG_SILVER_VERSIONS_TABLE", "hotel_booking_versions"),
+    "ICEBERG_SILVER_CURRENT_TABLE": os.environ.get("ICEBERG_SILVER_CURRENT_TABLE", "current_hotel_bookings"),
+    "ICEBERG_SILVER_METRICS_TABLE": os.environ.get("ICEBERG_SILVER_METRICS_TABLE", "booking_metrics"),
     "ICEBERG_WAREHOUSE": os.environ.get("ICEBERG_WAREHOUSE", "s3://warehouse/"),
     "AWS_REGION": os.environ.get("AWS_REGION", "us-east-1"),
     "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
@@ -65,7 +77,7 @@ SCRIPT_ENV = {
 }
 
 VALIDATION_TABLES = [
-    "scd_hotel_bookings",
+    "int_hotel_booking_versions",
     "int_current_hotel_bookings",
     "int_booking_metrics",
     "fact_bookings",
@@ -188,7 +200,7 @@ def create_iceberg_external_catalog() -> None:
 
             sql = f"""
             CREATE EXTERNAL CATALOG `{ICEBERG_CATALOG_NAME}`
-            COMMENT "External catalog to Apache Iceberg raw history on MinIO"
+            COMMENT "External catalog to Apache Iceberg Bronze/Silver tables on MinIO"
             PROPERTIES (
                 "type" = "iceberg",
                 "iceberg.catalog.type" = "rest",
@@ -207,6 +219,14 @@ def create_iceberg_external_catalog() -> None:
 def run_spark_iceberg_ingestion() -> None:
     _run_command(
         ["python", str(SCRIPTS_DIR / "ingest_batches_to_iceberg.py"), "--batch-dir", str(BATCH_DIR)],
+        env=SCRIPT_ENV,
+    )
+
+
+def run_spark_iceberg_silver_models() -> None:
+    """Materialize Silver Iceberg tables for dedup, version, current, and metrics data."""
+    _run_command(
+        ["python", str(SCRIPTS_DIR / "build_silver_iceberg_tables.py")],
         env=SCRIPT_ENV,
     )
 
@@ -238,6 +258,26 @@ def validate_iceberg_history_row_counts() -> None:
             raise AirflowException(
                 f"Iceberg row count mismatch for {batch_id}: expected={expected}, actual={actual}"
             )
+
+
+def validate_iceberg_silver_tables() -> None:
+    """Validate that Silver Iceberg tables are visible through StarRocks and non-empty."""
+    with _starrocks_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(f"SHOW TABLES FROM `{ICEBERG_CATALOG_NAME}`.`{ICEBERG_SILVER_DATABASE}`")
+            visible_tables = {row[0] for row in cursor.fetchall()}
+            missing = sorted(set(ICEBERG_SILVER_TABLES) - visible_tables)
+            if missing:
+                raise AirflowException(f"Missing Silver Iceberg tables: {missing}")
+
+            for table_name in ICEBERG_SILVER_TABLES:
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM `{ICEBERG_CATALOG_NAME}`.`{ICEBERG_SILVER_DATABASE}`.`{table_name}`"
+                )
+                row_count = int(cursor.fetchone()[0])
+                print(f"{ICEBERG_SILVER_DATABASE}.{table_name}: {row_count:,} rows")
+                if row_count <= 0:
+                    raise AirflowException(f"Silver Iceberg table has no rows: {table_name}")
 
 
 def run_dbt_debug() -> None:
@@ -323,7 +363,7 @@ def validate_materialized_view_rewrite() -> None:
 
 
 def log_validation_counts() -> None:
-    """Log SCD2/current/fact/mart counts and fail on empty serving tables."""
+    """Log version/current/fact/mart counts and fail on empty serving tables."""
     with _starrocks_connection(STARROCKS_DATABASE) as connection:
         with connection.cursor() as cursor:
             for table_name in VALIDATION_TABLES:
@@ -338,7 +378,7 @@ def log_validation_counts() -> None:
                 SELECT COUNT(*)
                 FROM (
                     SELECT booking_key
-                    FROM scd_hotel_bookings
+                    FROM int_hotel_booking_versions
                     WHERE is_current = 1
                     GROUP BY booking_key
                     HAVING COUNT(*) > 1
@@ -371,8 +411,8 @@ def log_validation_counts() -> None:
                 SELECT COUNT(*)
                 FROM (
                     SELECT a.booking_key
-                    FROM scd_hotel_bookings a
-                    JOIN scd_hotel_bookings b
+                    FROM int_hotel_booking_versions a
+                    JOIN int_hotel_booking_versions b
                       ON a.booking_key = b.booking_key
                      AND a.valid_from < COALESCE(b.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
                      AND b.valid_from < COALESCE(a.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
@@ -472,6 +512,16 @@ with DAG(
             python_callable=validate_iceberg_history_row_counts,
         )
 
+        run_spark_silver_task = PythonOperator(
+            task_id="run_spark_iceberg_silver_models",
+            python_callable=run_spark_iceberg_silver_models,
+        )
+
+        validate_silver_tables_task = PythonOperator(
+            task_id="validate_iceberg_silver_tables",
+            python_callable=validate_iceberg_silver_tables,
+        )
+
         (
             wait_for_minio_task
             >> upload_batches_to_minio_task
@@ -481,6 +531,8 @@ with DAG(
             >> create_starrocks_database_task
             >> create_iceberg_external_catalog_task
             >> validate_iceberg_history_task
+            >> run_spark_silver_task
+            >> validate_silver_tables_task
         )
 
     with TaskGroup(group_id="transformation") as transformation:

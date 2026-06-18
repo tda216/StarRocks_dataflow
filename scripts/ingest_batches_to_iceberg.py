@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     from pyspark.sql import SparkSession
@@ -16,6 +17,8 @@ except ImportError as exc:
     raise SystemExit(
         "Missing dependency: pyspark. Run this inside the Airflow image or install PySpark locally."
     ) from exc
+
+from batch_storage import BatchStorageMetadata, build_partitioned_batch_object_key
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -75,6 +78,11 @@ OUTPUT_COLUMNS = [
     "batch_sequence",
     "batch_effective_at",
     "batch_row_number",
+    "etl_year",
+    "etl_month",
+    "etl_day",
+    "watermark_date",
+    "raw_batch_sequence",
     "source_file_name",
     "source_object_path",
     "file_hash",
@@ -84,6 +92,16 @@ OUTPUT_COLUMNS = [
     "synthetic_operation",
     *SOURCE_COLUMNS,
 ]
+
+BRONZE_PARTITION_COLUMNS = {
+    "etl_year": "INT",
+    "etl_month": "INT",
+    "etl_day": "INT",
+    "watermark_date": "STRING",
+    "raw_batch_sequence": "STRING",
+}
+
+BRONZE_PARTITION_FIELD = "watermark_date"
 
 
 def env(name: str, default: str) -> str:
@@ -135,6 +153,7 @@ def build_spark() -> SparkSession:
         .config(f"spark.sql.catalog.{catalog_name}.type", "rest")
         .config(f"spark.sql.catalog.{catalog_name}.uri", rest_uri)
         .config(f"spark.sql.catalog.{catalog_name}.warehouse", warehouse)
+        .config(f"spark.sql.catalog.{catalog_name}.cache-enabled", "false")
         .config(f"spark.sql.catalog.{catalog_name}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
         .config(f"spark.sql.catalog.{catalog_name}.s3.endpoint", minio_endpoint)
         .config(f"spark.sql.catalog.{catalog_name}.s3.path-style-access", "true")
@@ -163,29 +182,139 @@ def create_table_if_needed(spark: SparkSession, table_name: str) -> None:
     spark.sql(f"CREATE DATABASE IF NOT EXISTS {catalog}.{database}")
 
     source_column_ddl = ",\n        ".join(f"{column} STRING" for column in SOURCE_COLUMNS)
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {table_name} (
-            source_dataset STRING,
-            original_source_row_number BIGINT,
-            booking_key STRING,
-            batch_id STRING,
-            batch_sequence INT,
-            batch_effective_at TIMESTAMP,
-            batch_row_number BIGINT,
-            source_file_name STRING,
-            source_object_path STRING,
-            file_hash STRING,
-            record_hash STRING,
-            ingested_at TIMESTAMP,
-            row_ingestion_id STRING,
-            synthetic_operation STRING,
-            {source_column_ddl}
-        )
-        USING iceberg
-        PARTITIONED BY (batch_id)
-        """
+    create_sql = f"""
+    CREATE TABLE IF NOT EXISTS {table_name} (
+        source_dataset STRING,
+        original_source_row_number BIGINT,
+        booking_key STRING,
+        batch_id STRING,
+        batch_sequence INT,
+        batch_effective_at TIMESTAMP,
+        batch_row_number BIGINT,
+        etl_year INT,
+        etl_month INT,
+        etl_day INT,
+        watermark_date STRING,
+        raw_batch_sequence STRING,
+        source_file_name STRING,
+        source_object_path STRING,
+        file_hash STRING,
+        record_hash STRING,
+        ingested_at TIMESTAMP,
+        row_ingestion_id STRING,
+        synthetic_operation STRING,
+        {source_column_ddl}
     )
+    USING iceberg
+    PARTITIONED BY (watermark_date)
+    """
+
+    try:
+        spark.sql(create_sql)
+    except Exception as exc:
+        if _is_corrupt_metadata_error(exc):
+            print(
+                f"Detected corrupt Iceberg metadata for {table_name}. "
+                "Dropping the catalog entry and recreating the deterministic local MVP table."
+            )
+            drop_corrupt_iceberg_table(spark, table_name)
+            spark.sql(create_sql)
+        else:
+            raise
+    ensure_table_columns(spark, table_name)
+    ensure_watermark_partition_spec(spark, table_name)
+
+
+def ensure_table_columns(spark: SparkSession, table_name: str) -> None:
+    existing_columns = {
+        row["col_name"]
+        for row in spark.sql(f"DESCRIBE TABLE {table_name}").collect()
+        if row["col_name"] and not str(row["col_name"]).startswith("#")
+    }
+    for column_name, column_type in BRONZE_PARTITION_COLUMNS.items():
+        if column_name not in existing_columns:
+            spark.sql(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+            print(f"Added missing Bronze column: {table_name}.{column_name} {column_type}")
+
+
+def _is_duplicate_partition_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in ("already exists", "duplicate", "cannot add", "exists in partition spec"))
+
+
+def _is_missing_partition_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in ("cannot find", "not found", "missing", "does not exist"))
+
+
+def _is_corrupt_metadata_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "metadata.json" in message
+        or "location does not exist" in message
+        or "nosuchtableexception" in message
+    )
+
+
+def drop_corrupt_iceberg_table(spark: SparkSession, table_name: str) -> None:
+    try:
+        spark.sql(f"DROP TABLE IF EXISTS {table_name}")
+    except Exception as exc:
+        print(f"Spark DROP TABLE could not clean corrupt Iceberg entry for {table_name}: {exc}")
+    unregister_iceberg_table_via_rest(table_name)
+
+
+def unregister_iceberg_table_via_rest(table_name: str) -> None:
+    try:
+        import requests
+    except ImportError:
+        print("requests is unavailable; skipping REST catalog unregister fallback")
+        return
+
+    parts = table_name.split(".")
+    if len(parts) != 3:
+        print(f"Cannot unregister table with unexpected identifier format: {table_name}")
+        return
+
+    _, namespace, table = parts
+    rest_uri = env("ICEBERG_REST_URI", "http://iceberg-rest:8181").rstrip("/")
+    url = f"{rest_uri}/v1/namespaces/{quote(namespace, safe='')}/tables/{quote(table, safe='')}"
+    try:
+        response = requests.delete(url, timeout=20)
+    except Exception as exc:
+        print(f"REST catalog unregister request failed for {table_name}: {exc}")
+        return
+
+    if response.status_code in {200, 202, 204, 404}:
+        print(f"REST catalog unregister status for {table_name}: {response.status_code}")
+        return
+
+    print(
+        f"REST catalog unregister returned {response.status_code} for {table_name}: "
+        f"{response.text[:500]}"
+    )
+
+
+def ensure_watermark_partition_spec(spark: SparkSession, table_name: str) -> None:
+    try:
+        spark.sql(f"ALTER TABLE {table_name} ADD PARTITION FIELD {BRONZE_PARTITION_FIELD}")
+        print(f"Added Bronze Iceberg partition field: {table_name}.{BRONZE_PARTITION_FIELD}")
+    except Exception as exc:
+        if _is_duplicate_partition_error(exc):
+            print(f"Bronze Iceberg partition field already present: {BRONZE_PARTITION_FIELD}")
+        else:
+            raise
+
+    # Existing local MVP tables may have been created with batch_id partitioning.
+    # Drop it from the current partition spec so future writes use watermark_date.
+    try:
+        spark.sql(f"ALTER TABLE {table_name} DROP PARTITION FIELD batch_id")
+        print(f"Dropped legacy Bronze Iceberg partition field: {table_name}.batch_id")
+    except Exception as exc:
+        if _is_missing_partition_error(exc):
+            print("Legacy Bronze Iceberg partition field already absent: batch_id")
+        else:
+            print(f"Could not drop legacy partition field batch_id; existing data remains queryable: {exc}")
 
 
 def batch_already_ingested(spark: SparkSession, table_name: str, batch_id: str) -> bool:
@@ -201,6 +330,7 @@ def read_and_enrich_batch(
     local_batch_file: Path,
     object_key: str,
     bucket: str,
+    storage_metadata: BatchStorageMetadata,
 ) :
     schema = StructType([StructField(column, StringType(), True) for column in [*BATCH_COLUMNS, *SOURCE_COLUMNS]])
     s3a_uri = f"s3a://{bucket}/{object_key}"
@@ -218,6 +348,11 @@ def read_and_enrich_batch(
         .withColumn("batch_sequence", F.col("batch_sequence").cast("int"))
         .withColumn("batch_effective_at", F.to_timestamp(F.col("batch_effective_at")))
         .withColumn("batch_row_number", F.col("batch_row_number").cast("bigint"))
+        .withColumn("etl_year", F.lit(storage_metadata.etl_year).cast("int"))
+        .withColumn("etl_month", F.lit(storage_metadata.etl_month).cast("int"))
+        .withColumn("etl_day", F.lit(storage_metadata.etl_day).cast("int"))
+        .withColumn("watermark_date", F.lit(storage_metadata.watermark_date))
+        .withColumn("raw_batch_sequence", F.lit(storage_metadata.raw_batch_sequence))
         .withColumn("source_file_name", F.lit(local_batch_file.name))
         .withColumn("source_object_path", F.lit(source_object_path))
         .withColumn("file_hash", F.lit(file_hash))
@@ -261,12 +396,13 @@ def ingest_batches(batch_dir: Path, force: bool = False) -> None:
                 print(f"Skipping {batch_id}: already exists in {table_name}")
                 continue
 
-            object_key = f"{prefix}/{batch_file.name}"
+            object_key, storage_metadata = build_partitioned_batch_object_key(prefix, batch_file)
             df = read_and_enrich_batch(
                 spark,
                 local_batch_file=batch_file,
                 object_key=object_key,
                 bucket=bucket,
+                storage_metadata=storage_metadata,
             )
             row_count = df.count()
             df.writeTo(table_name).append()

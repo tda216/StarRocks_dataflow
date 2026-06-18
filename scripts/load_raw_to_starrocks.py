@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Legacy direct StarRocks raw-table loader.
 
-The primary MVP flow now uses generated CSV batches, Spark, Iceberg raw
-history, StarRocks external catalog, and dbt SCD2/current models. Keep this
-script only as a local fallback/demo for direct StarRocks FILES()/Stream Load.
+The primary MVP flow now uses generated CSV batches, Spark Bronze/Silver
+Iceberg tables, StarRocks external catalog, dbt views over Iceberg, and
+internal StarRocks Gold serving tables. Keep this script only as a local
+fallback/demo for direct StarRocks FILES()/Stream Load.
 """
 
 from __future__ import annotations

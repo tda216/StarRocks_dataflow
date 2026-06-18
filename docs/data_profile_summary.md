@@ -1,6 +1,6 @@
 # Data Profile Summary
 
-Generated at: 2026-06-14 14:49:07 UTC
+Generated at: 2026-06-18 03:02:11 UTC
 
 - Dataset path: `data/input/hotel_bookings.csv`
 - So dong (rows): 119,390

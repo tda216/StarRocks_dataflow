@@ -13,6 +13,8 @@ except ImportError as exc:
         "Missing dependency: minio. Install with `python3 -m pip install -r scripts/requirements.txt`."
     ) from exc
 
+from batch_storage import build_partitioned_batch_object_key
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT_DIR / ".env"
@@ -67,11 +69,14 @@ def upload_batches(batch_dir: Path = DEFAULT_BATCH_DIR) -> list[str]:
 
     uploaded: list[str] = []
     for batch_file in batch_files:
-        object_key = f"{prefix}/{batch_file.name}"
+        object_key, metadata = build_partitioned_batch_object_key(prefix, batch_file)
         client.fput_object(bucket, object_key, str(batch_file), content_type="text/csv")
         object_uri = f"s3://{bucket}/{object_key}"
         uploaded.append(object_uri)
-        print(f"Uploaded {batch_file} -> {object_uri}")
+        print(
+            f"Uploaded {batch_file} -> {object_uri} "
+            f"(watermark_date={metadata.watermark_date}, raw_batch_sequence={metadata.raw_batch_sequence})"
+        )
 
     return uploaded
 

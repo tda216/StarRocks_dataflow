@@ -145,7 +145,7 @@ Trong Superset UI:
 Không tạo dataset từ:
 
 - `raw_hotel_bookings_history`
-- `scd_hotel_bookings`
+- `int_hotel_booking_versions`
 - `int_current_hotel_bookings`
 - `int_booking_metrics`
 - `fact_bookings`

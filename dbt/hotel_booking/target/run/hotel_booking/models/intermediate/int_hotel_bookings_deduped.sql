@@ -1,32 +1,19 @@
 
-  
-    
+  create view `hotel_booking`.`int_hotel_bookings_deduped__dbt_tmp` as 
 
-  create table `hotel_booking`.`int_hotel_bookings_deduped__dbt_tmp`
-      DUPLICATE KEY (booking_key,batch_id)
-    DISTRIBUTED BY HASH (booking_key)BUCKETS 16
-    PROPERTIES (
-      "replication_num" = "1"
-    )
-  as 
-
-WITH ranked AS (
-    SELECT
-        *,
-        ROW_NUMBER() OVER (
-            PARTITION BY booking_key, batch_id, record_hash
-            ORDER BY row_ingestion_id, ingested_at
-        ) AS duplicate_rank
-    FROM `hotel_booking`.`stg_iceberg_raw_hotel_bookings`
-)
 SELECT
-    booking_key,
-    batch_id,
     source_dataset,
     original_source_row_number,
+    booking_key,
+    batch_id,
     batch_sequence,
     batch_effective_at,
     batch_row_number,
+    etl_year,
+    etl_month,
+    etl_day,
+    watermark_date,
+    raw_batch_sequence,
     source_file_name,
     source_object_path,
     file_hash,
@@ -66,6 +53,4 @@ SELECT
     total_of_special_requests,
     reservation_status,
     reservation_status_date
-FROM ranked
-WHERE duplicate_rank = 1
-  
+FROM `iceberg_catalog`.`hotel_booking_silver`.`deduped_hotel_bookings`;

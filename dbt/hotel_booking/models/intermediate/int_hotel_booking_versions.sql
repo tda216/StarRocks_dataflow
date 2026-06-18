@@ -1,46 +1,20 @@
 {{ config(
-    materialized='table',
-    engine='OLAP',
-    table_type='DUPLICATE',
-    keys=['booking_key', 'valid_from'],
-    distributed_by=['booking_key'],
-    buckets=16,
-    properties={'replication_num': '1'}
+    materialized='view'
 ) }}
 
-WITH ordered_records AS (
-    SELECT
-        *,
-        LAG(record_hash) OVER (
-            PARTITION BY booking_key
-            ORDER BY batch_sequence, batch_effective_at, row_ingestion_id
-        ) AS previous_record_hash
-    FROM {{ ref('int_hotel_bookings_deduped') }}
-),
-change_records AS (
-    SELECT *
-    FROM ordered_records
-    WHERE previous_record_hash IS NULL
-       OR record_hash <> previous_record_hash
-),
-versioned AS (
-    SELECT
-        *,
-        batch_effective_at AS valid_from,
-        LEAD(batch_effective_at) OVER (
-            PARTITION BY booking_key
-            ORDER BY batch_sequence, batch_effective_at, row_ingestion_id
-        ) AS valid_to
-    FROM change_records
-)
 SELECT
     booking_key,
     valid_from,
     source_dataset,
     original_source_row_number,
-    batch_id AS first_seen_batch_id,
-    batch_sequence AS first_seen_batch_sequence,
+    first_seen_batch_id,
+    first_seen_batch_sequence,
     batch_effective_at,
+    etl_year,
+    etl_month,
+    etl_day,
+    watermark_date,
+    raw_batch_sequence,
     source_file_name,
     source_object_path,
     file_hash,
@@ -82,4 +56,4 @@ SELECT
     total_of_special_requests,
     reservation_status,
     reservation_status_date
-FROM versioned
+FROM `{{ env_var('ICEBERG_CATALOG_NAME', 'iceberg_catalog') }}`.`{{ env_var('ICEBERG_SILVER_DATABASE', 'hotel_booking_silver') }}`.`{{ env_var('ICEBERG_SILVER_VERSIONS_TABLE', 'hotel_booking_versions') }}`

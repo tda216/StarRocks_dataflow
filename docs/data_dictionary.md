@@ -69,6 +69,18 @@ Generated batch files are written to:
 data/input/incremental_batches/
 ```
 
+When uploaded to MinIO raw storage, batch files use Hive-style ingestion partitions:
+
+```text
+hotel_booking_demand/incremental_batches/
+  etl_year=2026/
+    etl_month=01/
+      etl_day=01/
+        watermark_date=20260101/
+          raw_batch_sequence=001/
+            batch_001_initial.csv
+```
+
 Stable key:
 
 ```text
@@ -89,16 +101,21 @@ Metadata columns:
 | `batch_effective_at` | Deterministic effective timestamp used as SCD2 `valid_from`. |
 | `batch_row_number` | Row order inside the generated batch file. |
 | `synthetic_operation` | Demo label such as `initial`, `update`, `duplicate_replay`, or fixture operation. |
+| `etl_year` | Raw landing partition year from `batch_effective_at`. |
+| `etl_month` | Raw landing partition month from `batch_effective_at`. |
+| `etl_day` | Raw landing partition day from `batch_effective_at`. |
+| `watermark_date` | Raw landing watermark in `yyyyMMdd` format. |
+| `raw_batch_sequence` | Zero-padded sequence used in the raw object path. |
 
 ## Iceberg Raw History
 
-Iceberg table:
+Bronze Iceberg table:
 
 ```text
 iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history
 ```
 
-Spark appends generated batch CSVs to this Iceberg table. Iceberg manages the table and stores data in Parquet under the MinIO `warehouse` bucket.
+Spark appends generated batch CSVs to this Iceberg table. Iceberg manages the table and stores data in Parquet under the MinIO `warehouse` bucket. The Bronze table is partitioned by `watermark_date` for daily batch pruning.
 
 Additional ingestion metadata:
 
@@ -106,6 +123,9 @@ Additional ingestion metadata:
 | --- | --- |
 | `source_file_name` | Generated batch CSV filename. |
 | `source_object_path` | Raw MinIO object path for the batch file. |
+| `etl_year`, `etl_month`, `etl_day` | Ingestion date partitions. |
+| `watermark_date` | Ingestion watermark date in `yyyyMMdd` format. |
+| `raw_batch_sequence` | Zero-padded batch sequence from raw object path. |
 | `file_hash` | SHA-256 hash of the local batch file content. |
 | `record_hash` | SHA-256 hash of normalized business columns only. |
 | `ingested_at` | Physical ingestion timestamp. Not used for SCD2 validity. |
@@ -113,12 +133,43 @@ Additional ingestion metadata:
 
 `record_hash` excludes ingestion metadata and derived metrics. It is used by dbt to detect business changes.
 
-## SCD2 Fields
+## Iceberg Silver Tables
 
-SCD2 table:
+Silver Iceberg tables:
 
 ```text
-hotel_booking.scd_hotel_bookings
+iceberg_catalog.hotel_booking_silver.deduped_hotel_bookings
+iceberg_catalog.hotel_booking_silver.hotel_booking_versions
+iceberg_catalog.hotel_booking_silver.current_hotel_bookings
+iceberg_catalog.hotel_booking_silver.booking_metrics
+```
+
+Spark builds these physical Silver tables from Bronze raw history:
+
+| Table | Grain | Purpose |
+| --- | --- | --- |
+| `deduped_hotel_bookings` | one row per `booking_key + batch_id + record_hash` | Removes exact duplicate/replay rows while keeping valid A -> B -> A history. |
+| `hotel_booking_versions` | one row per business version of a `booking_key` | Stores SCD Type 2/version history from change records only. |
+| `current_hotel_bookings` | one current row per `booking_key` | Stores cleaned and typed latest business state. |
+| `booking_metrics` | one current booking row with derived metrics | Adds revenue, guest, stay length, lead time, and analysis bucket metrics. |
+
+dbt exposes these Silver tables through StarRocks views:
+
+```text
+hotel_booking.int_hotel_bookings_deduped
+hotel_booking.int_hotel_booking_versions
+hotel_booking.int_current_hotel_bookings
+hotel_booking.int_booking_metrics
+```
+
+SCD2 is a storage/versioning technique here, not a separate business layer. The physical version history lives in Iceberg Silver; the dbt `int_hotel_booking_versions` object is a view used for validation and downstream Gold models.
+
+## SCD2 Fields
+
+Physical SCD2/version table:
+
+```text
+iceberg_catalog.hotel_booking_silver.hotel_booking_versions
 ```
 
 | Column | Meaning |

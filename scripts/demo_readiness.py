@@ -33,10 +33,10 @@ EXPECTED_BATCH_IDS = {
     "batch_005_reverted_state",
 }
 
-EXPECTED_INTERNAL_TABLES = [
+EXPECTED_STARROCKS_OBJECTS = [
     "stg_iceberg_raw_hotel_bookings",
     "int_hotel_bookings_deduped",
-    "scd_hotel_bookings",
+    "int_hotel_booking_versions",
     "int_current_hotel_bookings",
     "int_booking_metrics",
     "fact_bookings",
@@ -64,6 +64,13 @@ EXPECTED_MATERIALIZED_VIEWS = {
     "mv_monthly_booking_revenue",
     "mv_hotel_performance",
 }
+
+EXPECTED_SILVER_TABLES = [
+    "deduped_hotel_bookings",
+    "hotel_booking_versions",
+    "current_hotel_bookings",
+    "booking_metrics",
+]
 
 
 class DemoReport:
@@ -192,9 +199,24 @@ def check_minio(report: DemoReport) -> None:
             report.fail(f"No batch objects found in s3://{bucket}/{prefix}/")
             return
 
-        report.ok(f"Batch objects in MinIO: {len(batch_objects)}")
-        for obj in batch_objects:
-            print(f"- s3://{bucket}/{obj.object_name} ({obj.size} bytes)")
+        partitioned_objects = [
+            obj
+            for obj in batch_objects
+            if all(
+                marker in obj.object_name
+                for marker in ("etl_year=", "etl_month=", "etl_day=", "watermark_date=", "raw_batch_sequence=")
+            )
+        ]
+        legacy_objects = [obj for obj in batch_objects if obj not in partitioned_objects]
+        if partitioned_objects:
+            report.ok(f"Partitioned raw batch objects found: {len(partitioned_objects)}")
+            for obj in partitioned_objects:
+                print(f"- s3://{bucket}/{obj.object_name} ({obj.size} bytes)")
+        else:
+            report.fail("No partitioned raw batch objects found under MinIO raw prefix")
+
+        if legacy_objects:
+            print(f"Legacy flat batch objects also present from earlier runs: {len(legacy_objects)}")
 
         warehouse_bucket = env("MINIO_WAREHOUSE_BUCKET", "warehouse")
         if client.bucket_exists(warehouse_bucket):
@@ -273,26 +295,70 @@ def check_iceberg_history(report: DemoReport, cursor: pymysql.cursors.Cursor) ->
         report.fail(f"Iceberg history check failed: {exc}")
 
 
-def check_internal_tables(report: DemoReport, cursor: pymysql.cursors.Cursor) -> None:
-    report.section("dbt Internal Tables")
+def check_iceberg_silver_tables(report: DemoReport, cursor: pymysql.cursors.Cursor) -> None:
+    report.section("Iceberg Silver Tables")
+    catalog = env("ICEBERG_CATALOG_NAME", "iceberg_catalog")
+    database = env("ICEBERG_SILVER_DATABASE", "hotel_booking_silver")
+    expected_tables = [
+        env("ICEBERG_SILVER_DEDUPED_TABLE", EXPECTED_SILVER_TABLES[0]),
+        env("ICEBERG_SILVER_VERSIONS_TABLE", EXPECTED_SILVER_TABLES[1]),
+        env("ICEBERG_SILVER_CURRENT_TABLE", EXPECTED_SILVER_TABLES[2]),
+        env("ICEBERG_SILVER_METRICS_TABLE", EXPECTED_SILVER_TABLES[3]),
+    ]
+
+    try:
+        cursor.execute(f"SHOW DATABASES FROM `{catalog}`")
+        databases = {row[0] for row in cursor.fetchall()}
+        if database in databases:
+            report.ok(f"Silver Iceberg database visible from StarRocks: {catalog}.{database}")
+        else:
+            report.fail(f"Missing Silver Iceberg database from StarRocks: {catalog}.{database}")
+            return
+
+        cursor.execute(f"SHOW TABLES FROM `{catalog}`.`{database}`")
+        tables = {row[0] for row in cursor.fetchall()}
+        missing = sorted(set(expected_tables) - tables)
+        if missing:
+            report.fail(f"Missing Silver Iceberg tables: {missing}")
+            return
+
+        report.ok("All expected Silver Iceberg tables exist")
+        rows: list[tuple[str, int]] = []
+        for table_name in expected_tables:
+            row_count = int(
+                fetch_scalar(
+                    cursor,
+                    f"SELECT COUNT(*) FROM `{catalog}`.`{database}`.`{table_name}`",
+                )
+            )
+            rows.append((table_name, row_count))
+            if row_count <= 0:
+                report.fail(f"Silver Iceberg table has no rows: {table_name}")
+        print_rows(["table_name", "row_count"], rows)
+    except Exception as exc:
+        report.fail(f"Silver Iceberg check failed: {exc}")
+
+
+def check_dbt_objects(report: DemoReport, cursor: pymysql.cursors.Cursor) -> None:
+    report.section("dbt Views and Serving Tables")
     database = env("STARROCKS_DATABASE", "hotel_booking")
 
     cursor.execute(f"SHOW TABLES FROM `{database}`")
     tables = {row[0] for row in cursor.fetchall()}
-    missing_tables = sorted(set(EXPECTED_INTERNAL_TABLES) - tables)
+    missing_tables = sorted(set(EXPECTED_STARROCKS_OBJECTS) - tables)
     if missing_tables:
-        report.fail(f"Missing internal dbt tables: {missing_tables}")
+        report.fail(f"Missing dbt views/tables: {missing_tables}")
     else:
-        report.ok("All expected staging/intermediate/fact/dim/mart tables exist")
+        report.ok("All expected staging/intermediate views and fact/dim/mart tables exist")
 
     count_rows: list[tuple[str, int]] = []
-    for table_name in EXPECTED_INTERNAL_TABLES:
+    for table_name in EXPECTED_STARROCKS_OBJECTS:
         if table_name not in tables:
             continue
         row_count = int(fetch_scalar(cursor, f"SELECT COUNT(*) FROM `{database}`.`{table_name}`"))
         count_rows.append((table_name, row_count))
         if row_count <= 0:
-            report.fail(f"Table has no rows: {table_name}")
+            report.fail(f"dbt object has no rows: {table_name}")
 
     print_rows(["table_name", "row_count"], count_rows)
 
@@ -315,7 +381,7 @@ def check_scd2_validations(report: DemoReport, cursor: pymysql.cursors.Cursor) -
             SELECT COUNT(*)
             FROM (
                 SELECT booking_key
-                FROM `{database}`.`scd_hotel_bookings`
+                FROM `{database}`.`int_hotel_booking_versions`
                 WHERE is_current = 1
                 GROUP BY booking_key
                 HAVING COUNT(*) > 1
@@ -325,8 +391,8 @@ def check_scd2_validations(report: DemoReport, cursor: pymysql.cursors.Cursor) -
             SELECT COUNT(*)
             FROM (
                 SELECT a.booking_key
-                FROM `{database}`.`scd_hotel_bookings` a
-                JOIN `{database}`.`scd_hotel_bookings` b
+                FROM `{database}`.`int_hotel_booking_versions` a
+                JOIN `{database}`.`int_hotel_booking_versions` b
                   ON a.booking_key = b.booking_key
                  AND a.valid_from < COALESCE(b.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
                  AND b.valid_from < COALESCE(a.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
@@ -345,7 +411,7 @@ def check_scd2_validations(report: DemoReport, cursor: pymysql.cursors.Cursor) -
     cursor.execute(
         f"""
         SELECT booking_key, COUNT(*) AS version_count
-        FROM `{database}`.`scd_hotel_bookings`
+        FROM `{database}`.`int_hotel_booking_versions`
         WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
         GROUP BY booking_key
         ORDER BY booking_key
@@ -469,7 +535,8 @@ def main() -> int:
             with connection.cursor() as cursor:
                 check_starrocks_core(report, cursor)
                 check_iceberg_history(report, cursor)
-                check_internal_tables(report, cursor)
+                check_iceberg_silver_tables(report, cursor)
+                check_dbt_objects(report, cursor)
                 check_scd2_validations(report, cursor)
                 check_materialized_views(report, cursor)
                 check_query_rewrite(report, cursor)
