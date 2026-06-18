@@ -1,486 +1,351 @@
-# StarRocks Dataflow
+# StarRocks Dataflow - Trịnh Đức An (S.AI.20K)
 
-Local BI POC cho hotel booking analytics. Project mô phỏng một flow BI đơn giản theo tinh thần architecture production, nhưng chạy được trên laptop.
+## Mục tiêu POC
 
-## Mục đích POC
+POC này validate một **local batch BI dataflow** cho bài toán **Hotel Booking Analytics**. Mục tiêu chính là kiểm tra cách StarRocks có thể đóng vai trò:
 
-Production-like flow trong dự án gốc có thể dùng Redshift / ClickHouse cho warehouse và serving. Trong POC này, StarRocks đóng vai trò cả warehouse và serving layer để validate local MVP:
+- query dữ liệu từ lakehouse layer thông qua **External Catalog**
+- materialize **Gold fact/dim/mart tables** vào StarRocks internal storage
+- serve mart tables cho **Superset dashboard**
+- tối ưu một số dashboard query lặp lại bằng **Materialized View + Query Rewrite**
+
+POC này tập trung vào **functional feasibility** và **architecture design**, không phải performance benchmark chính thức.
+
+## 1. Layer & Storage Design
+
+```mermaid
+flowchart LR
+    A["Hotel Booking CSV"] --> B["Synthetic Batch Generator"]
+    B --> C["MinIO raw bucket<br/>partitioned by etl_date / watermark"]
+    C --> D["Spark Bronze ingestion"]
+    D --> E["Bronze Iceberg<br/>raw_hotel_bookings_history<br/>append-only raw history"]
+    E --> F["Spark Silver build"]
+    F --> G["Silver Iceberg<br/>dedup / SCD2 versions / current / metrics"]
+    G --> H["StarRocks External Catalog<br/>iceberg_catalog"]
+    H --> I["dbt Views<br/>over Iceberg Bronze/Silver"]
+    I --> J["StarRocks Internal Gold<br/>fact / dim / mart"]
+    J --> K["StarRocks Materialized Views<br/>query rewrite"]
+    J --> L["Superset Dashboard<br/>mart tables only"]
+    K -. "query rewrite optimization" .-> L
+```
+
+| Layer | Tool / Format | Storage / Object | Responsibility |
+| --- | --- | --- | --- |
+| Source | CSV | `data/input/hotel_bookings.csv` | Original Kaggle dataset. |
+| Synthetic batch layer | Python-generated CSV | `data/input/incremental_batches/batch_*.csv` | Generate deterministic incremental batches with persisted `booking_key`, updates, duplicate replay and SCD2 fixtures. |
+| Raw landing | MinIO / CSV | `hotel-booking-raw/.../etl_year=.../watermark_date=.../raw_batch_sequence=.../batch_*.csv` | Immutable raw batch files for replay, audit and debug. |
+| Bronze lakehouse | Iceberg / Parquet on MinIO | `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` | Append-only raw historical records, partitioned by `watermark_date`. |
+| Silver lakehouse | Iceberg / Parquet on MinIO | `iceberg_catalog.hotel_booking_silver.*` | Physical dedup, SCD2/version history, current state and metrics tables built by Spark. |
+| External catalog | StarRocks External Catalog | `iceberg_catalog` | StarRocks reads Iceberg tables without owning their storage or table type. |
+| dbt staging/intermediate | dbt + StarRocks views | `stg_*`, `int_*` | Expose Bronze/Silver Iceberg objects as StarRocks views and run validation tests. |
+| Gold serving | StarRocks internal tables | `fact_bookings`, `dim_*`, `mart_*` | Materialized dbt serving layer for BI. |
+| Optimization | StarRocks Materialized Views | `mv_daily_booking_revenue`, `mv_monthly_booking_revenue`, `mv_hotel_performance` | Precompute selected aggregations and validate query rewrite. |
+| Dashboard | Superset | Datasets from `mart_*` tables | BI visualization from StarRocks mart tables. |
+
+## 2. Dataset
+
+Dataset sử dụng: **Hotel Booking Demand**
+
+- Rows: `119,390`
+- Columns: `32`
+- Grain: `1 row = 1 hotel booking record`
+- Domain fit: hospitality / hotel / resort BI
+
+Dataset có các chiều phân tích phù hợp với dashboard:
+
+- `hotel`
+- `arrival_date`
+- `room type`
+- `market_segment`
+- `distribution_channel`
+- `country`
+- `customer_type`
+- `lead_time`
+- `is_canceled`
+- `adr`
+
+Dataset không có real cost/expense, nên đây **không phải true PNL dataset**. Các metrics như `estimated_revenue` và `realized_revenue` được derive từ `adr * total_nights`.
+
+## 3. Raw MinIO Storage
+
+Raw batch files được lưu immutable trên MinIO theo Hive-style ingestion partition.
+
+Ví dụ path:
 
 ```text
-CSV -> MinIO raw -> Bronze Iceberg history -> Silver Iceberg tables -> StarRocks/dbt Gold marts -> StarRocks MVs -> Superset dashboard
+hotel-booking-raw/
+  hotel_booking_demand/
+    incremental_batches/
+      etl_year=2026/
+        etl_month=01/
+          etl_day=01/
+            watermark_date=20260101/
+              raw_batch_sequence=001/
+                batch_001_initial.csv
 ```
 
-Đây không phải performance benchmark chính thức. MVP hiện tại không bao gồm realtime/streaming, Cube.dev, semantic layer, hoặc Agentic AI.
+Lý do dùng partition path:
 
-## MVP Scope
+- dễ audit batch nào được ingest vào ngày nào
+- dễ replay/debug từng batch
+- dễ cleanup/retention theo `etl_date` hoặc `watermark_date`
+- tránh lưu raw files trong một flat folder khó quản lý
 
-Included:
+Current generated batch files:
 
-- Generate synthetic incremental batch CSVs từ local source CSV.
-- Upload immutable batch CSV files vào MinIO raw bucket.
-- Dùng Spark technical pre-transform để append Bronze raw history vào Iceberg.
-- Dùng Spark build Silver Iceberg tables cho dedup, SCD2/version history, current state, and booking metrics.
-- Query Iceberg Bronze/Silver tables qua StarRocks external catalog.
-- Dùng dbt qua StarRocks để expose intermediate views, run tests, and materialize Gold fact, dimension, and mart tables.
-- Tạo và validate StarRocks Materialized Views cho một số aggregation serving/query rewrite.
-- Orchestrate batch pipeline bằng Airflow manual DAG.
-- Build Superset dashboard từ StarRocks mart tables.
+| Batch file | Purpose | Expected row count |
+| --- | --- | ---: |
+| `batch_001_initial.csv` | Initial business state | 119,390 |
+| `batch_002_updates.csv` | Selected changed records, exact duplicates and new records | 17 |
+| `batch_003_duplicate_replay.csv` | Replay duplicates to test idempotency | 15 |
+| `batch_004_same_state.csv` | `A -> A -> A` fixture, expected 1 SCD2 version | 1 |
+| `batch_005_reverted_state.csv` | `A -> B -> A` fixture, expected 3 SCD2 versions | 1 |
 
-Not included:
+## 4. Iceberg Storage
 
-- Realtime ingestion.
-- Cube.dev / semantic layer.
-- Agentic AI.
-- Real PNL, real cost, or real profit calculation.
-- Formal performance benchmark.
+Iceberg stores table metadata and physical Parquet files in the MinIO `warehouse` bucket.
 
-## Tech Stack
+Điểm quan trọng:
 
-| Tool | Role |
-| --- | --- |
-| Docker Compose | Local service orchestration |
-| MinIO | Raw object storage |
-| Iceberg REST Catalog | Lakehouse catalog cho Bronze raw history và Silver tables |
-| Spark / PySpark | Technical pre-transform, Iceberg append-only ingestion, and Silver table build |
-| StarRocks | External catalog reader + internal warehouse/serving layer |
-| StarRocks Materialized View | Precomputed aggregation and query rewrite validation |
-| dbt | SQL transformation and mart creation |
-| Airflow | Batch orchestration |
-| Superset | BI dashboard |
+- MinIO raw bucket chỉ lưu immutable CSV batch files.
+- Iceberg quản lý table metadata, snapshots, manifests và physical Parquet files.
+- Không nên debug Iceberg bằng cách đọc trực tiếp folder Parquet.
+- Nên inspect lineage qua SQL columns như `source_object_path`, `file_hash`, `watermark_date`, `batch_id`, `batch_sequence`.
 
-## Architecture
+### 4.1 Bronze Iceberg
 
-```text
-data/input/hotel_bookings.csv
-  -> generated incremental batch CSVs
-  -> MinIO bucket hotel-booking-raw
-  -> Bronze Iceberg raw history in MinIO warehouse bucket
-  -> Silver Iceberg dedup/version/current/metrics tables
-  -> StarRocks external catalog iceberg_catalog
-  -> dbt views over Iceberg Silver tables
-  -> StarRocks internal Gold fact/dim/mart serving tables
-  -> StarRocks Materialized Views for selected aggregations
-  -> Superset datasets and dashboard
-```
-
-Important: Spark handles technical Bronze/Silver lakehouse processing. dbt runs through StarRocks, reads Iceberg through the StarRocks external catalog, exposes intermediate views, and materializes Gold serving tables inside StarRocks. dbt does not transform files directly in MinIO.
-
-More detail: [docs/architecture.md](docs/architecture.md)
-
-## Local Resource Notes
-
-StarRocks + Airflow + Superset can be memory-heavy.
-
-Recommended:
-
-- 16GB RAM preferred.
-- 8GB RAM possible with conservative Docker limits.
-- Increase Docker Desktop memory if containers restart due to OOM.
-- Stop optional services when testing one layer only.
-- Keep dbt threads low, for example `1` or `2`.
-- Airflow runs local PySpark ingestion for this MVP, so the Airflow scheduler can use more memory during ingestion.
-
-Resource limits in `docker-compose.yml` are intentionally conservative for local development.
-
-## Dataset
-
-Place Kaggle Hotel Booking Demand CSV here:
-
-```text
-data/input/hotel_bookings.csv
-```
-
-Run lightweight profile:
-
-```bash
-python3 scripts/profile_dataset.py
-```
-
-Generated summary for the original Kaggle CSV only:
-
-```text
-docs/data_profile_summary.md
-```
-
-This profile does not describe generated incremental batches or Iceberg history. Those are validated later by batch/SCD2 checks.
-
-Data dictionary: [docs/data_dictionary.md](docs/data_dictionary.md)
-
-## Start Services
-
-Create `.env` if needed:
-
-```bash
-cp .env.example .env
-```
-
-Validate Compose:
-
-```bash
-docker compose config
-```
-
-Start stack:
-
-```bash
-docker compose up -d --build
-```
-
-Check services:
-
-```bash
-docker compose ps
-```
-
-Stop services but keep volumes:
-
-```bash
-docker compose down
-```
-
-Reset all local state, including MinIO, StarRocks, Airflow metadata, and Superset dashboards:
-
-```bash
-docker compose down -v
-```
-
-## Open UIs
-
-| UI | URL | Default Login |
+| Table | Purpose | Partition |
 | --- | --- | --- |
-| MinIO | `http://localhost:9001` | `minioadmin / minioadmin` |
-| Airflow | `http://localhost:8080` | `admin / admin` |
-| Superset | `http://localhost:8088` | `admin / admin` |
-| StarRocks FE | `http://localhost:8030` if available | no login configured for local MVP |
+| `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` | Append-only raw historical records with ingestion metadata and business-only `record_hash` | `watermark_date` |
 
-StarRocks SQL check:
+Bronze table giữ toàn bộ raw history theo batch. Đây là nơi phục vụ replay, audit và kiểm tra incremental load.
 
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SELECT 1;"
-```
+### 4.2 Silver Iceberg
 
-## Run the Pipeline with Airflow
+| Table | Purpose |
+| --- | --- |
+| `deduped_hotel_bookings` | Exact duplicate collapse by `booking_key + batch_id + record_hash` |
+| `hotel_booking_versions` | SCD Type 2 / version history from change records only |
+| `current_hotel_bookings` | Latest `is_current = 1` version per `booking_key` |
+| `booking_metrics` | Typed, cleaned metrics table with derived fields for Gold dbt models |
 
-DAG name:
+Silver tables là physical Iceberg tables được build bởi Spark. Việc để Silver ở Iceberg giúp phát huy ưu điểm của lakehouse: lưu intermediate/checkpoint data ngoài StarRocks internal storage, giảm áp lực SSD/storage cho StarRocks, đồng thời giữ khả năng audit/replay.
+
+## 5. Incremental, Dedup & SCD2 Logic
+
+### 5.1 Stable Key
 
 ```text
-hotel_booking_pipeline
+booking_key = source_dataset + ':' + original_source_row_number
 ```
 
-Trigger manually:
+`booking_key` được generate một lần bởi `scripts/generate_synthetic_batches.py` và được persist trong mọi generated batch file.
 
-```bash
-docker compose exec airflow-webserver airflow dags unpause hotel_booking_pipeline
-docker compose exec airflow-webserver airflow dags trigger hotel_booking_pipeline
+Spark **không được regenerate** key này bằng non-deterministic `row_number()`, vì như vậy các batch sau có thể không match đúng business entity.
+
+### 5.2 Hash Rule
+
+`record_hash` được compute từ normalized business columns only.
+
+Excluded from `record_hash`:
+
+- `batch_id`
+- `batch_sequence`
+- `source_file_name`
+- `source_object_path`
+- `file_hash`
+- `ingested_at`
+- `row_ingestion_id`
+- `synthetic_operation`
+- derived metrics như `estimated_revenue`, `realized_revenue`, `cancellation_rate`
+
+Lý do: `record_hash` phải đại diện cho **business state**, không phải ingestion metadata. Nếu metadata được đưa vào hash, cùng một business record ingest lại ở batch khác sẽ bị hiểu nhầm là business change.
+
+### 5.3 Exact Dedup
+
+Silver exact dedup loại duplicate/replay records theo key:
+
+```text
+booking_key + batch_id + record_hash
 ```
 
-Task groups:
+Logic này chỉ remove duplicate trong cùng batch, không global dedup theo `booking_key + record_hash`, vì case `A -> B -> A` vẫn phải được giữ lại để tạo đúng 3 SCD2 versions.
+
+### 5.4 SCD2 / Version History
+
+SCD2 là **versioning/storage technique**, không phải một business layer riêng trong dbt.
+
+Trong POC này:
+
+- Spark Silver build physical version table: `iceberg_catalog.hotel_booking_silver.hotel_booking_versions`
+- dbt expose table này thành StarRocks view: `hotel_booking.int_hotel_booking_versions`
+- view này dùng cho dbt tests và downstream Gold models
+
+SCD2 logic:
+
+- order records by `booking_key`, `batch_sequence`, `batch_effective_at`
+- detect change bằng `LAG(record_hash)`
+- consecutive same `record_hash` values được compress thành một version
+- `valid_from = batch_effective_at`
+- `valid_to = LEAD(valid_from)` over change records
+- `is_current = valid_to IS NULL`
+
+Expected behavior:
+
+| Case | Expected behavior |
+| --- | --- |
+| `A -> A -> A` | 1 version |
+| `A -> B -> A` | 3 versions |
+| Duplicate replay | Không làm tăng current/fact/mart counts |
+| Same `booking_key + batch_id` nhưng nhiều `record_hash` | Validation fails |
+
+## 6. dbt Models
+
+dbt chạy qua StarRocks. dbt không đọc trực tiếp file trong MinIO.
+
+Actual flow:
+
+```text
+MinIO raw CSV
+-> Bronze Iceberg
+-> Silver Iceberg
+-> StarRocks External Catalog
+-> dbt views over Iceberg
+-> StarRocks internal Gold fact/dim/mart tables
+```
+
+| dbt object | Type | Source | Purpose |
+| --- | --- | --- | --- |
+| `stg_iceberg_raw_hotel_bookings` | View | Bronze Iceberg raw history | Expose raw history with typed metadata |
+| `int_hotel_bookings_deduped` | View | Silver `deduped_hotel_bookings` | Expose deduped records |
+| `int_hotel_booking_versions` | View | Silver `hotel_booking_versions` | Expose version history/SCD2 result |
+| `int_current_hotel_bookings` | View | Silver `current_hotel_bookings` | Expose current state |
+| `int_booking_metrics` | View | Silver `booking_metrics` | Expose cleaned metrics for Gold models |
+| `fact_bookings` | Internal table | `int_booking_metrics` | Booking-level Gold fact, stable by `booking_key` |
+| `dim_*` | Internal tables | `int_booking_metrics` | Analysis dimensions |
+| `mart_*` | Internal tables | `fact_bookings` / `dim_*` | Superset-ready aggregated marts |
+
+## 7. StarRocks Table Type Strategy
+
+StarRocks table type ảnh hưởng tới cách data được lưu, merge, replace hoặc aggregate trong StarRocks internal storage.
+
+| Object | Storage owner | StarRocks type | Reason |
+| --- | --- | --- | --- |
+| Bronze/Silver Iceberg tables | Iceberg | Not applicable | External tables are managed by Iceberg, not StarRocks internal storage |
+| `stg_*`, `int_*` | StarRocks view definitions over Iceberg | View | Keep stg/int lightweight and avoid duplicating Silver storage into StarRocks SSD |
+| `fact_bookings` | StarRocks internal | `PRIMARY KEY(booking_key)` | Stable one row per current booking, used as serving fact and MV source |
+| `dim_*` | StarRocks internal | `DUPLICATE KEY` in current MVP | Small full-refresh dimension tables generated from `SELECT DISTINCT`; uniqueness is controlled by dbt SQL/tests |
+| `mart_*` | StarRocks internal | `DUPLICATE KEY` | Aggregated serving tables rebuilt by dbt full-refresh in local MVP |
+| `mv_*` | StarRocks internal MV | Materialized View | Precompute selected aggregations and validate query rewrite |
+
+Note về `dim_*`:
+
+- Current MVP dùng `DUPLICATE KEY` cho `dim_*` vì dimension tables nhỏ, được full-refresh và uniqueness do dbt kiểm soát.
+- Nếu production hoặc muốn semantic chặt hơn, stable current dimensions nên dùng `PRIMARY KEY(dimension_key)`.
+- Historical/SCD dimensions nên dùng grain kiểu `natural_key + valid_from`.
+
+## 8. Airflow Pipeline
+
+Airflow orchestrates batch pipeline theo 5 nhóm chính:
 
 ```text
 precheck
-  -> ingestion
-  -> transformation
-  -> optimization
-  -> validation
+-> ingestion
+-> transformation
+-> optimization
+-> validation
 ```
 
-The DAG performs:
-
-- check CSV exists
-- profile dataset
-- generate synthetic incremental batches
-- upload batch CSVs to MinIO
-- append batch history to Iceberg with Spark
-- wait for StarRocks
-- create StarRocks database and Iceberg external catalog
-- validate Iceberg raw history row count by batch
-- build Silver Iceberg tables for dedup, SCD2/version history, current state, and booking metrics
-- validate Silver Iceberg tables through StarRocks external catalog
-- run dbt debug/run/test
-- create, refresh, and validate StarRocks Materialized Views
-- validate StarRocks query rewrite to `mv_daily_booking_revenue`
-- log version/current/fact/mart row counts
-
-Repeated runs are idempotent at the Iceberg ingestion step: a previously ingested `batch_id` is skipped. dbt also compresses consecutive unchanged business states so duplicate replay does not inflate current/fact/mart counts.
-
-## Manual Batch and Iceberg Load if Needed
-
-Install script dependencies:
-
-```bash
-python3 -m pip install -r scripts/requirements.txt
-```
-
-Generate deterministic incremental batches:
-
-```bash
-python3 scripts/generate_synthetic_batches.py
-```
-
-Upload generated batches to MinIO:
-
-```bash
-python3 scripts/upload_incremental_batches_to_minio.py
-```
-
-Batch files are uploaded to Hive-style raw partition paths:
+Detailed flow:
 
 ```text
-hotel_booking_demand/incremental_batches/
-  etl_year=2026/
-    etl_month=01/
-      etl_day=01/
-        watermark_date=20260101/
-          raw_batch_sequence=001/
-            batch_001_initial.csv
+precheck:
+  check_csv_exists
+  profile_dataset
+  generate_synthetic_batches
+
+ingestion:
+  wait_for_minio
+  upload_batches_to_minio
+  wait_for_iceberg_rest
+  run_spark_iceberg_ingestion
+  wait_for_starrocks
+  create_starrocks_database
+  create_iceberg_external_catalog
+  validate_iceberg_history_row_counts
+  run_spark_iceberg_silver_models
+  validate_iceberg_silver_tables
+
+transformation:
+  dbt_debug
+  dbt_run
+  dbt_test
+
+optimization:
+  apply_starrocks_materialized_views
+  validate_materialized_view_rewrite
+
+validation:
+  log_validation_counts
 ```
 
-These partition folders describe ingestion/watermark metadata for raw storage. SCD2 still uses `booking_key`, `batch_id`, `batch_sequence`, and `batch_effective_at`.
+Superset không nằm trong Airflow DAG vì Superset là BI serving/consumer layer. DAG chỉ build và validate data layer. Sau khi DAG chạy xong, Superset query mart tables để render dashboard.
 
-Bronze Iceberg `raw_hotel_bookings_history` is partitioned by `watermark_date` for daily batch pruning. Iceberg warehouse folders are managed by Iceberg metadata; use SQL lineage columns instead of manually reading warehouse paths.
+## 9. Validation
 
-Run Spark/Iceberg ingestion inside the Airflow container:
+| Validation area | Implementation |
+| --- | --- |
+| Dataset exists | Airflow `check_csv_exists`, local file check |
+| Raw MinIO objects | `scripts/demo_readiness.py` checks 5 partitioned raw batch objects |
+| Bronze row count | Airflow compares generated CSV row count with Iceberg raw history count by `batch_id` |
+| Silver tables | Airflow checks Silver Iceberg tables are visible from StarRocks and non-empty |
+| Multiple states per batch | dbt custom tests fail if one `booking_key + batch_id` has multiple distinct `record_hash` |
+| Duplicate current version | dbt custom test checks only one current version per `booking_key` |
+| SCD2 overlap | dbt custom test checks no overlapping validity periods |
+| Fixture behavior | dbt tests validate `A -> A -> A = 1 version` and `A -> B -> A = 3 versions` |
+| dbt result | Current validation: `dbt run` passed `24/24`, `dbt test` passed `86/86` |
+| MV validation | Checks MV exists, active, `query_rewrite_status = VALID`, totals match marts, and `EXPLAIN` uses `mv_daily_booking_revenue` |
 
-```bash
-docker compose exec airflow-webserver python /opt/airflow/scripts/ingest_batches_to_iceberg.py \
-  --batch-dir /opt/airflow/data/input/incremental_batches
-```
+Current row count snapshot:
 
-Build Silver Iceberg tables manually if needed:
+| Object | Row count |
+| --- | ---: |
+| Bronze raw history | 119,424 |
+| Silver `deduped_hotel_bookings` | 119,422 |
+| Silver `hotel_booking_versions` | 119,405 |
+| Silver `current_hotel_bookings` | 119,395 |
+| Silver `booking_metrics` | 119,395 |
+| Gold `fact_bookings` | 119,395 |
+| `mart_daily_booking_revenue` | 793 |
+| `mart_monthly_booking_revenue` | 26 |
+| `mart_hotel_performance` | 2 |
 
-```bash
-docker compose exec airflow-webserver python /opt/airflow/scripts/build_silver_iceberg_tables.py
-```
+Lưu ý: row count snapshot là kết quả của generated batches hiện tại. Nếu batch generator thay đổi, số liệu validation cần được cập nhật lại.
 
-## Run dbt Manually if Needed
+## 10. Materialized View
 
-Run inside Airflow container:
+Materialized Views là optimization layer trong StarRocks. MVs được tạo/refreshed sau khi `dbt_test` pass.
 
-```bash
-docker compose exec airflow-webserver dbt debug \
-  --project-dir /opt/airflow/dbt/hotel_booking \
-  --profiles-dir /opt/airflow/dbt/hotel_booking
-```
+| MV | Source | Validation |
+| --- | --- | --- |
+| `mv_daily_booking_revenue` | `fact_bookings` | Totals match `mart_daily_booking_revenue`; `EXPLAIN` rewrite validated |
+| `mv_monthly_booking_revenue` | `fact_bookings` | Totals match `mart_monthly_booking_revenue` |
+| `mv_hotel_performance` | `fact_bookings` | Totals match `mart_hotel_performance` |
 
-```bash
-docker compose exec airflow-webserver dbt run \
-  --project-dir /opt/airflow/dbt/hotel_booking \
-  --profiles-dir /opt/airflow/dbt/hotel_booking
-```
-
-```bash
-docker compose exec airflow-webserver dbt test \
-  --project-dir /opt/airflow/dbt/hotel_booking \
-  --profiles-dir /opt/airflow/dbt/hotel_booking
-```
-
-## Validate StarRocks Tables
-
-Check database and tables:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW DATABASES;"
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW TABLES FROM hotel_booking;"
-```
-
-Check StarRocks external catalog:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW CATALOGS;"
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW DATABASES FROM iceberg_catalog;"
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW TABLES FROM iceberg_catalog.hotel_booking_lakehouse;"
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW TABLES FROM iceberg_catalog.hotel_booking_silver;"
-```
-
-Check Iceberg raw history by batch:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT batch_id, COUNT(*) AS row_count
-FROM iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history
-GROUP BY batch_id
-ORDER BY batch_id;
-"
-```
-
-Check raw partition metadata in Bronze Iceberg:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT batch_id, etl_year, etl_month, etl_day, watermark_date, raw_batch_sequence, COUNT(*) AS row_count
-FROM hotel_booking.stg_iceberg_raw_hotel_bookings
-GROUP BY batch_id, etl_year, etl_month, etl_day, watermark_date, raw_batch_sequence
-ORDER BY raw_batch_sequence;
-"
-```
-
-Check Silver Iceberg row counts:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT 'deduped_hotel_bookings' AS table_name, COUNT(*) AS row_count
-FROM iceberg_catalog.hotel_booking_silver.deduped_hotel_bookings
-UNION ALL
-SELECT 'hotel_booking_versions', COUNT(*)
-FROM iceberg_catalog.hotel_booking_silver.hotel_booking_versions
-UNION ALL
-SELECT 'current_hotel_bookings', COUNT(*)
-FROM iceberg_catalog.hotel_booking_silver.current_hotel_bookings
-UNION ALL
-SELECT 'booking_metrics', COUNT(*)
-FROM iceberg_catalog.hotel_booking_silver.booking_metrics;
-"
-```
-
-Check SCD2 fixtures:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT booking_key, COUNT(*) AS version_count
-FROM hotel_booking.int_hotel_booking_versions
-WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
-GROUP BY booking_key;
-"
-```
-
-Check SCD2 quality validations:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT booking_key, batch_id, COUNT(DISTINCT record_hash) AS hash_count
-FROM hotel_booking.stg_iceberg_raw_hotel_bookings
-GROUP BY booking_key, batch_id
-HAVING COUNT(DISTINCT record_hash) > 1;
-"
-```
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT a.booking_key
-FROM hotel_booking.int_hotel_booking_versions a
-JOIN hotel_booking.int_hotel_booking_versions b
-  ON a.booking_key = b.booking_key
- AND a.valid_from < COALESCE(b.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
- AND b.valid_from < COALESCE(a.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
- AND a.valid_from <> b.valid_from
-LIMIT 10;
-"
-```
-
-Check key marts:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT 'fact_bookings' AS table_name, COUNT(*) AS row_count FROM hotel_booking.fact_bookings
-UNION ALL
-SELECT 'mart_daily_booking_revenue', COUNT(*) FROM hotel_booking.mart_daily_booking_revenue
-UNION ALL
-SELECT 'mart_monthly_booking_revenue', COUNT(*) FROM hotel_booking.mart_monthly_booking_revenue
-UNION ALL
-SELECT 'mart_hotel_performance', COUNT(*) FROM hotel_booking.mart_hotel_performance
-UNION ALL
-SELECT 'mart_room_performance', COUNT(*) FROM hotel_booking.mart_room_performance
-UNION ALL
-SELECT 'mart_market_segment_performance', COUNT(*) FROM hotel_booking.mart_market_segment_performance
-UNION ALL
-SELECT 'mart_channel_performance', COUNT(*) FROM hotel_booking.mart_channel_performance
-UNION ALL
-SELECT 'mart_country_performance', COUNT(*) FROM hotel_booking.mart_country_performance
-UNION ALL
-SELECT 'mart_cancellation_analysis', COUNT(*) FROM hotel_booking.mart_cancellation_analysis
-UNION ALL
-SELECT 'mart_lead_time_analysis', COUNT(*) FROM hotel_booking.mart_lead_time_analysis
-UNION ALL
-SELECT 'mart_customer_type_performance', COUNT(*) FROM hotel_booking.mart_customer_type_performance;
-"
-```
-
-## StarRocks Materialized Views
-
-Materialized Views run in the main Airflow DAG after `dbt_test`. They demonstrate StarRocks precomputed aggregation and query rewrite behavior after dbt has created `fact_bookings`.
-
-Current MVs:
-
-- `mv_daily_booking_revenue`
-- `mv_monthly_booking_revenue`
-- `mv_hotel_performance`
-
-The DAG runs this script automatically. Run it manually only when testing this layer directly:
-
-```bash
-docker compose exec airflow-webserver python /opt/airflow/scripts/apply_starrocks_materialized_views.py
-```
-
-Manual StarRocks checks:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW MATERIALIZED VIEWS FROM hotel_booking;"
-```
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT 'mv_daily_booking_revenue' AS object_name, COUNT(*) AS row_count
-FROM hotel_booking.mv_daily_booking_revenue
-UNION ALL
-SELECT 'mart_daily_booking_revenue', COUNT(*)
-FROM hotel_booking.mart_daily_booking_revenue
-UNION ALL
-SELECT 'mv_monthly_booking_revenue', COUNT(*)
-FROM hotel_booking.mv_monthly_booking_revenue
-UNION ALL
-SELECT 'mart_monthly_booking_revenue', COUNT(*)
-FROM hotel_booking.mart_monthly_booking_revenue
-UNION ALL
-SELECT 'mv_hotel_performance', COUNT(*)
-FROM hotel_booking.mv_hotel_performance
-UNION ALL
-SELECT 'mart_hotel_performance', COUNT(*)
-FROM hotel_booking.mart_hotel_performance;
-"
-```
-
-The DAG also validates query rewrite with `EXPLAIN`: a matching aggregate query written against `fact_bookings` should scan `mv_daily_booking_revenue`.
-
-Important: Superset dashboard still uses dbt mart tables by default. The `mv_*` objects are the StarRocks optimization layer, not the business source of truth.
-
-Full checklist: [docs/final_validation_checklist.md](docs/final_validation_checklist.md)
-
-## Superset Dashboard
-
-Superset StarRocks SQLAlchemy URI:
+Important distinction:
 
 ```text
-starrocks://root:@starrocks:9030/default_catalog.hotel_booking
+dbt mart tables = business source of truth for dashboard
+Materialized Views = StarRocks optimization layer
+Superset = query mart datasets by default
+StarRocks may rewrite matching queries to MV internally
 ```
 
-Create/update the demo dashboard automatically:
+## 11. Dashboard
 
-```bash
-docker compose up -d superset
-docker compose exec superset python /app/bootstrap_scripts/bootstrap_superset_dashboard.py
-```
+Superset dashboard dùng **StarRocks mart tables only**.
 
-The bootstrap script creates:
-
-- database connection `StarRocks Hotel Booking`
-- 10 datasets from mart tables
-- 13 demo charts
-- dashboard `Hotel Booking BI Dashboard`
-
-If the Superset container has not been recreated after the `scripts/` mount was added, use:
-
-```bash
-docker compose cp scripts/bootstrap_superset_dashboard.py superset:/tmp/bootstrap_superset_dashboard.py
-docker compose exec superset python /tmp/bootstrap_superset_dashboard.py
-```
-
-Open dashboard:
-
-```text
-http://localhost:8088/superset/dashboard/hotel-booking-bi-dashboard/
-```
-
-Superset datasets must come from mart tables only:
+Allowed datasets:
 
 - `mart_daily_booking_revenue`
 - `mart_monthly_booking_revenue`
@@ -493,96 +358,47 @@ Superset datasets must come from mart tables only:
 - `mart_lead_time_analysis`
 - `mart_customer_type_performance`
 
-Dashboard name:
+Do not use:
 
-```text
-Hotel Booking BI Dashboard
-```
+- raw tables
+- staging/intermediate views
+- SCD2/version history tables
+- fact table
+- dimension tables
 
-Dashboard docs:
+Lý do: mart tables đã được aggregate theo use case dashboard. Nếu dashboard query raw/staging/intermediate/fact trực tiếp, business logic sẽ bị phân tán vào BI layer và dễ gây double count.
 
-- [docs/dashboard_plan.md](docs/dashboard_plan.md)
-- [docs/superset_dashboard_guide.md](docs/superset_dashboard_guide.md)
+## 12. Scope & Limitations
 
-Dashboard charts should query mart datasets only, not raw/staging/intermediate tables.
+Included:
 
-## Known Limitations
+- batch-only pipeline
+- MinIO raw landing
+- Bronze/Silver Iceberg on MinIO
+- StarRocks External Catalog
+- dbt views and Gold internal tables
+- StarRocks Materialized View + Query Rewrite validation
+- Superset dashboard from mart tables
 
-- Dataset is not real Vinpearl data.
-- Kaggle dataset has no natural booking ID, so this MVP uses synthetic `booking_key = source_dataset + original_source_row_number`.
-- Dataset has no real cost/expense fields.
-- `estimated_revenue = adr * total_nights`.
-- `realized_revenue = estimated_revenue` only for non-cancelled bookings.
-- Any cost/margin/PNL is simulated only and should be labelled clearly.
-- No realtime/streaming in this MVP.
-- No Cube.dev, semantic layer, or Agentic AI in this MVP.
-- Local Docker performance is not a production benchmark.
-- Iceberg external tables are managed by Iceberg, not by StarRocks table types. StarRocks table type choices apply only to internal dbt materializations.
-- Silver Iceberg tables are rebuilt deterministically for the MVP. Production can switch this step to incremental/MERGE logic if needed.
-- StarRocks Materialized Views are optimization objects refreshed by the Airflow DAG; dbt mart tables remain the business source of truth.
+Not included:
 
-## StarRocks Table Types
+- realtime / streaming
+- Cube.dev
+- semantic layer
+- Agentic AI
+- formal performance benchmark
+- real PNL, real cost, real profit calculation
 
-| Layer / model | Storage owner | StarRocks table type |
-| --- | --- | --- |
-| Bronze `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` | Iceberg external table | Not applicable |
-| Silver `iceberg_catalog.hotel_booking_silver.deduped_hotel_bookings` | Iceberg external table | Not applicable |
-| Silver `iceberg_catalog.hotel_booking_silver.hotel_booking_versions` | Iceberg external table for SCD2/version history | Not applicable |
-| Silver `iceberg_catalog.hotel_booking_silver.current_hotel_bookings` | Iceberg external table | Not applicable |
-| Silver `iceberg_catalog.hotel_booking_silver.booking_metrics` | Iceberg external table | Not applicable |
-| `stg_iceberg_raw_hotel_bookings` | StarRocks view over Bronze Iceberg raw history | View, no table type |
-| `int_hotel_bookings_deduped` | StarRocks view over Silver Iceberg table | View, no StarRocks table type |
-| `int_hotel_booking_versions` | StarRocks view over Silver SCD2/version table | View, no StarRocks table type |
-| `int_current_hotel_bookings` current model | StarRocks view over Silver current table | View, no StarRocks table type |
-| `int_booking_metrics` | StarRocks view over Silver metrics table | View, no StarRocks table type |
-| `fact_bookings` | StarRocks internal Gold dbt table | `PRIMARY KEY(booking_key)` |
-| `dim_*` tables | StarRocks internal Gold dbt tables | `PRIMARY KEY` where configured |
-| `mart_*` tables | StarRocks internal Gold dbt tables | `DUPLICATE KEY` for MVP |
-| `mv_*` materialized views | StarRocks internal MV layer | `REFRESH MANUAL` aggregate acceleration/query rewrite |
+## 13. Final Takeaway
 
-## Troubleshooting
+So với MVP ban đầu chỉ load CSV vào StarRocks, flow hiện tại production-like hơn:
 
-Container OOM or restart:
+- raw batch files được lưu immutable trên MinIO
+- Iceberg quản lý Bronze/Silver historical and intermediate tables
+- Spark xử lý ingestion, dedup, SCD2/versioning, current state và metrics ở lakehouse layer
+- StarRocks đọc Iceberg qua External Catalog
+- dbt expose Silver bằng views và materialize Gold fact/dim/mart internal tables
+- Superset chỉ đọc mart tables
+- StarRocks MV validate khả năng query rewrite và serving optimization
 
-- Increase Docker Desktop memory.
-- Stop services not needed for the current test.
-- Keep dbt `threads` low.
-
-Airflow cannot see scripts:
-
-```bash
-docker compose up -d --build airflow-init airflow-webserver airflow-scheduler
-```
-
-Iceberg external catalog fails:
-
-- Confirm `iceberg-rest` is running.
-- Confirm MinIO has bucket `warehouse`.
-- Confirm StarRocks version supports Iceberg external catalog.
-- Recreate the catalog only after Iceberg REST and StarRocks are healthy.
-
-Spark/Iceberg ingestion fails with AWS region or credentials errors:
-
-- Confirm `.env` includes `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY`.
-- For local MinIO, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` should match `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`.
-- Rebuild/restart Airflow after changing Docker image dependencies:
-  `docker compose up -d --build airflow-init airflow-webserver airflow-scheduler`.
-
-StarRocks not reachable:
-
-```bash
-docker compose ps starrocks
-docker compose logs -f starrocks
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SELECT 1;"
-```
-
-Superset connection fails:
-
-- Use host `starrocks`, not `localhost`, inside Superset.
-- Use URI `starrocks://root:@starrocks:9030/default_catalog.hotel_booking`.
-- Confirm StarRocks and Superset are on `data_network`.
-
-Dashboard disappeared:
-
-- `docker compose down` keeps local volumes.
-- `docker compose down -v` deletes volumes, including all Superset metadata.
+Trade-off là local setup phức tạp hơn vì có thêm MinIO, Spark, Iceberg REST Catalog, StarRocks, dbt, Airflow và Superset. Tuy nhiên flow này thể hiện rõ hơn vai trò của Iceberg cho lakehouse storage và StarRocks cho serving/optimization layer.
