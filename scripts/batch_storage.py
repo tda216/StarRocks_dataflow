@@ -67,7 +67,6 @@ def build_partitioned_batch_object_key(prefix: str, batch_file: Path) -> tuple[s
         f"etl_year={metadata.etl_year}/"
         f"etl_month={metadata.etl_month:02d}/"
         f"etl_day={metadata.etl_day:02d}/"
-        f"watermark_date={metadata.watermark_date}/"
         f"raw_batch_sequence={metadata.raw_batch_sequence}/"
         f"{batch_file.name}"
     )

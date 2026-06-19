@@ -59,11 +59,11 @@ http://localhost:9001
 Expected bucket/object:
 
 ```text
-hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=01/watermark_date=20260101/raw_batch_sequence=001/batch_001_initial.csv
-hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=02/watermark_date=20260102/raw_batch_sequence=002/batch_002_updates.csv
-hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=03/watermark_date=20260103/raw_batch_sequence=003/batch_003_duplicate_replay.csv
-hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=04/watermark_date=20260104/raw_batch_sequence=004/batch_004_same_state.csv
-hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=05/watermark_date=20260105/raw_batch_sequence=005/batch_005_reverted_state.csv
+hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=01/raw_batch_sequence=001/batch_001_initial.csv
+hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=02/raw_batch_sequence=002/batch_002_updates.csv
+hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=03/raw_batch_sequence=003/batch_003_duplicate_replay.csv
+hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=04/raw_batch_sequence=004/batch_004_same_state.csv
+hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=05/raw_batch_sequence=005/batch_005_reverted_state.csv
 warehouse/
 ```
 
@@ -172,9 +172,6 @@ docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
 SELECT 'deduped_hotel_bookings' AS table_name, COUNT(*) AS row_count
 FROM iceberg_catalog.hotel_booking_silver.deduped_hotel_bookings
 UNION ALL
-SELECT 'hotel_booking_versions', COUNT(*)
-FROM iceberg_catalog.hotel_booking_silver.hotel_booking_versions
-UNION ALL
 SELECT 'current_hotel_bookings', COUNT(*)
 FROM iceberg_catalog.hotel_booking_silver.current_hotel_bookings
 UNION ALL
@@ -187,7 +184,6 @@ Expected default row counts:
 
 ```text
 deduped_hotel_bookings       119422
-hotel_booking_versions       119405
 current_hotel_bookings       119395
 booking_metrics              119395
 ```
@@ -226,7 +222,6 @@ SHOW TABLES FROM hotel_booking;
 Expected table groups:
 
 - `stg_iceberg_raw_hotel_bookings`
-- `int_hotel_booking_versions`
 - `int_current_hotel_bookings`
 - `int_booking_metrics`
 - `dim_*`
@@ -267,12 +262,12 @@ Expected:
 - `fact_bookings` should not inflate after duplicate replay.
 - mart tables have row count greater than `0`
 
-Check SCD2 fixtures:
+Check current-state edge-case fixtures:
 
 ```bash
 docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT booking_key, COUNT(*) AS version_count
-FROM hotel_booking.int_hotel_booking_versions
+SELECT booking_key, COUNT(*) AS change_state_count
+FROM hotel_booking.int_current_hotel_bookings
 WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
 GROUP BY booking_key
 ORDER BY booking_key;
@@ -283,22 +278,38 @@ Expected:
 
 ```text
 hotel_booking_demand:1    1
-hotel_booking_demand:2    3
+hotel_booking_demand:2    1
 ```
 
-Check no duplicate current records:
+Check current-state fixture batches:
 
 ```bash
 docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT booking_key, COUNT(*) AS current_count
-FROM hotel_booking.int_hotel_booking_versions
-WHERE is_current = 1
-GROUP BY booking_key
-HAVING COUNT(*) > 1;
+SELECT booking_key, first_seen_batch_id
+FROM hotel_booking.int_current_hotel_bookings
+WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
+ORDER BY booking_key;
 "
 ```
 
-Expected: no rows.
+Expected:
+
+```text
+hotel_booking_demand:1    batch_001_initial
+hotel_booking_demand:2    batch_005_reverted_state
+```
+
+Check current row count matches distinct booking keys:
+
+```bash
+docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
+SELECT
+    (SELECT COUNT(*) FROM hotel_booking.int_current_hotel_bookings) AS current_rows,
+    (SELECT COUNT(DISTINCT booking_key) FROM hotel_booking.stg_iceberg_raw_hotel_bookings) AS distinct_booking_keys;
+"
+```
+
+Expected: both values match.
 
 Check no multiple business states in the same batch for one `booking_key`:
 
@@ -308,23 +319,6 @@ SELECT booking_key, batch_id, COUNT(DISTINCT record_hash) AS hash_count
 FROM hotel_booking.stg_iceberg_raw_hotel_bookings
 GROUP BY booking_key, batch_id
 HAVING COUNT(DISTINCT record_hash) > 1;
-"
-```
-
-Expected: no rows.
-
-Check no overlapping SCD2 periods:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT a.booking_key
-FROM hotel_booking.int_hotel_booking_versions a
-JOIN hotel_booking.int_hotel_booking_versions b
-  ON a.booking_key = b.booking_key
- AND a.valid_from < COALESCE(b.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
- AND b.valid_from < COALESCE(a.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
- AND a.valid_from <> b.valid_from
-LIMIT 10;
 "
 ```
 

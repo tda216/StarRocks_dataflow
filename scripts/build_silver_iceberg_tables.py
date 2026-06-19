@@ -63,31 +63,6 @@ RAW_METADATA_COLUMNS = [
     "synthetic_operation",
 ]
 
-VERSION_COLUMNS = [
-    "booking_key",
-    "valid_from",
-    "source_dataset",
-    "original_source_row_number",
-    "first_seen_batch_id",
-    "first_seen_batch_sequence",
-    "batch_effective_at",
-    "etl_year",
-    "etl_month",
-    "etl_day",
-    "watermark_date",
-    "raw_batch_sequence",
-    "source_file_name",
-    "source_object_path",
-    "file_hash",
-    "record_hash",
-    "ingested_at",
-    "row_ingestion_id",
-    "synthetic_operation",
-    "valid_to",
-    "is_current",
-    *SOURCE_COLUMNS,
-]
-
 CURRENT_COLUMNS = [
     "booking_key",
     "source_dataset",
@@ -100,9 +75,6 @@ CURRENT_COLUMNS = [
     "etl_day",
     "watermark_date",
     "raw_batch_sequence",
-    "valid_from",
-    "valid_to",
-    "is_current",
     "record_hash",
     "source_file_name",
     "source_object_path",
@@ -158,9 +130,6 @@ METRIC_COLUMNS = [
     "etl_day",
     "watermark_date",
     "raw_batch_sequence",
-    "valid_from",
-    "valid_to",
-    "is_current",
     "record_hash",
     "hotel",
     "arrival_date",
@@ -262,14 +231,15 @@ def build_silver_tables() -> None:
 
     raw_history = f"{catalog}.{bronze_database}.{raw_table}"
     deduped = f"{catalog}.{silver_database}.{env('ICEBERG_SILVER_DEDUPED_TABLE', 'deduped_hotel_bookings')}"
-    versions = f"{catalog}.{silver_database}.{env('ICEBERG_SILVER_VERSIONS_TABLE', 'hotel_booking_versions')}"
     current = f"{catalog}.{silver_database}.{env('ICEBERG_SILVER_CURRENT_TABLE', 'current_hotel_bookings')}"
     metrics = f"{catalog}.{silver_database}.{env('ICEBERG_SILVER_METRICS_TABLE', 'booking_metrics')}"
+    legacy_versions = f"{catalog}.{silver_database}.hotel_booking_versions"
 
     spark = build_spark()
     try:
         spark.sql(f"CREATE DATABASE IF NOT EXISTS {catalog}.{silver_database}")
         ensure_table_columns(spark, raw_history)
+        spark.sql(f"DROP TABLE IF EXISTS {legacy_versions}")
 
         raw_columns = raw_history_projection()
         create_or_replace(
@@ -294,7 +264,7 @@ def build_silver_tables() -> None:
 
         create_or_replace(
             spark,
-            versions,
+            current,
             f"""
             WITH ordered_records AS (
                 SELECT
@@ -311,68 +281,28 @@ def build_silver_tables() -> None:
                 WHERE previous_record_hash IS NULL
                    OR record_hash <> previous_record_hash
             ),
-            versioned AS (
+            current_records AS (
                 SELECT
                     *,
-                    batch_effective_at AS valid_from,
-                    LEAD(batch_effective_at) OVER (
+                    ROW_NUMBER() OVER (
                         PARTITION BY booking_key
-                        ORDER BY batch_sequence, batch_effective_at, row_ingestion_id
-                    ) AS valid_to
+                        ORDER BY batch_sequence DESC, batch_effective_at DESC, row_ingestion_id DESC
+                    ) AS current_rank
                 FROM change_records
-            )
-            SELECT
-                booking_key,
-                valid_from,
-                source_dataset,
-                original_source_row_number,
-                batch_id AS first_seen_batch_id,
-                batch_sequence AS first_seen_batch_sequence,
-                batch_effective_at,
-                etl_year,
-                etl_month,
-                etl_day,
-                watermark_date,
-                raw_batch_sequence,
-                source_file_name,
-                source_object_path,
-                file_hash,
-                record_hash,
-                ingested_at,
-                row_ingestion_id,
-                synthetic_operation,
-                valid_to,
-                CASE WHEN valid_to IS NULL THEN 1 ELSE 0 END AS is_current,
-                {sql_select_columns(SOURCE_COLUMNS)}
-            FROM versioned
-            """,
-        )
-
-        create_or_replace(
-            spark,
-            current,
-            f"""
-            WITH current_versions AS (
-                SELECT *
-                FROM {versions}
-                WHERE is_current = 1
             ),
             cleaned AS (
                 SELECT
                     booking_key,
                     source_dataset,
                     original_source_row_number,
-                    first_seen_batch_id,
-                    first_seen_batch_sequence,
+                    batch_id AS first_seen_batch_id,
+                    batch_sequence AS first_seen_batch_sequence,
                     batch_effective_at,
                     etl_year,
                     etl_month,
                     etl_day,
                     watermark_date,
                     raw_batch_sequence,
-                    valid_from,
-                    valid_to,
-                    is_current,
                     record_hash,
                     source_file_name,
                     source_object_path,
@@ -412,7 +342,8 @@ def build_silver_tables() -> None:
                     NULLIF(NULLIF(TRIM(total_of_special_requests), ''), 'NULL') AS total_of_special_requests,
                     NULLIF(NULLIF(TRIM(reservation_status), ''), 'NULL') AS reservation_status,
                     NULLIF(NULLIF(TRIM(reservation_status_date), ''), 'NULL') AS reservation_status_date
-                FROM current_versions
+                FROM current_records
+                WHERE current_rank = 1
             ),
             typed AS (
                 SELECT
@@ -427,9 +358,6 @@ def build_silver_tables() -> None:
                     etl_day,
                     watermark_date,
                     raw_batch_sequence,
-                    valid_from,
-                    valid_to,
-                    is_current,
                     record_hash,
                     source_file_name,
                     source_object_path,
@@ -520,9 +448,6 @@ def build_silver_tables() -> None:
                 etl_day,
                 watermark_date,
                 raw_batch_sequence,
-                valid_from,
-                valid_to,
-                is_current,
                 record_hash,
                 hotel,
                 arrival_date,

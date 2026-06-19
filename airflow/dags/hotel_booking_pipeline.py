@@ -44,7 +44,6 @@ ICEBERG_RAW_HISTORY_TABLE = os.environ.get("ICEBERG_RAW_HISTORY_TABLE", "raw_hot
 ICEBERG_SILVER_DATABASE = os.environ.get("ICEBERG_SILVER_DATABASE", "hotel_booking_silver")
 ICEBERG_SILVER_TABLES = [
     os.environ.get("ICEBERG_SILVER_DEDUPED_TABLE", "deduped_hotel_bookings"),
-    os.environ.get("ICEBERG_SILVER_VERSIONS_TABLE", "hotel_booking_versions"),
     os.environ.get("ICEBERG_SILVER_CURRENT_TABLE", "current_hotel_bookings"),
     os.environ.get("ICEBERG_SILVER_METRICS_TABLE", "booking_metrics"),
 ]
@@ -62,7 +61,6 @@ SCRIPT_ENV = {
     "ICEBERG_RAW_HISTORY_TABLE": ICEBERG_RAW_HISTORY_TABLE,
     "ICEBERG_SILVER_DATABASE": ICEBERG_SILVER_DATABASE,
     "ICEBERG_SILVER_DEDUPED_TABLE": os.environ.get("ICEBERG_SILVER_DEDUPED_TABLE", "deduped_hotel_bookings"),
-    "ICEBERG_SILVER_VERSIONS_TABLE": os.environ.get("ICEBERG_SILVER_VERSIONS_TABLE", "hotel_booking_versions"),
     "ICEBERG_SILVER_CURRENT_TABLE": os.environ.get("ICEBERG_SILVER_CURRENT_TABLE", "current_hotel_bookings"),
     "ICEBERG_SILVER_METRICS_TABLE": os.environ.get("ICEBERG_SILVER_METRICS_TABLE", "booking_metrics"),
     "ICEBERG_WAREHOUSE": os.environ.get("ICEBERG_WAREHOUSE", "s3://warehouse/"),
@@ -77,7 +75,6 @@ SCRIPT_ENV = {
 }
 
 VALIDATION_TABLES = [
-    "int_hotel_booking_versions",
     "int_current_hotel_bookings",
     "int_booking_metrics",
     "fact_bookings",
@@ -224,7 +221,7 @@ def run_spark_iceberg_ingestion() -> None:
 
 
 def run_spark_iceberg_silver_models() -> None:
-    """Materialize Silver Iceberg tables for dedup, version, current, and metrics data."""
+    """Materialize Silver Iceberg tables for dedup, current, and metrics data."""
     _run_command(
         ["python", str(SCRIPTS_DIR / "build_silver_iceberg_tables.py")],
         env=SCRIPT_ENV,
@@ -363,7 +360,7 @@ def validate_materialized_view_rewrite() -> None:
 
 
 def log_validation_counts() -> None:
-    """Log version/current/fact/mart counts and fail on empty serving tables."""
+    """Log current/fact/mart counts and fail on empty serving tables."""
     with _starrocks_connection(STARROCKS_DATABASE) as connection:
         with connection.cursor() as cursor:
             for table_name in VALIDATION_TABLES:
@@ -372,23 +369,6 @@ def log_validation_counts() -> None:
                 print(f"{table_name}: {row_count:,} rows")
                 if row_count <= 0:
                     raise AirflowException(f"Table has no rows: {table_name}")
-
-            cursor.execute(
-                """
-                SELECT COUNT(*)
-                FROM (
-                    SELECT booking_key
-                    FROM int_hotel_booking_versions
-                    WHERE is_current = 1
-                    GROUP BY booking_key
-                    HAVING COUNT(*) > 1
-                ) duplicate_current
-                """
-            )
-            duplicate_current_count = int(cursor.fetchone()[0])
-            print(f"booking_keys with duplicate current versions: {duplicate_current_count}")
-            if duplicate_current_count > 0:
-                raise AirflowException("SCD2 validation failed: duplicate current versions found")
 
             cursor.execute(
                 """
@@ -408,23 +388,42 @@ def log_validation_counts() -> None:
 
             cursor.execute(
                 """
-                SELECT COUNT(*)
-                FROM (
-                    SELECT a.booking_key
-                    FROM int_hotel_booking_versions a
-                    JOIN int_hotel_booking_versions b
-                      ON a.booking_key = b.booking_key
-                     AND a.valid_from < COALESCE(b.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
-                     AND b.valid_from < COALESCE(a.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
-                     AND a.valid_from <> b.valid_from
-                    LIMIT 1
-                ) overlap_check
+                SELECT
+                    (SELECT COUNT(*) FROM int_current_hotel_bookings) AS current_rows,
+                    (SELECT COUNT(DISTINCT booking_key) FROM stg_iceberg_raw_hotel_bookings) AS distinct_booking_keys
                 """
             )
-            overlap_count = int(cursor.fetchone()[0])
-            print(f"SCD2 overlapping period check rows: {overlap_count}")
-            if overlap_count > 0:
-                raise AirflowException("SCD2 validation failed: overlapping validity periods found")
+            current_rows, distinct_booking_keys = (int(value) for value in cursor.fetchone())
+            print(
+                "current rows vs distinct booking keys: "
+                f"{current_rows} vs {distinct_booking_keys}"
+            )
+            if current_rows != distinct_booking_keys:
+                raise AirflowException(
+                    "Current-state validation failed: current row count does not match distinct booking keys"
+                )
+
+            cursor.execute(
+                """
+                SELECT booking_key, first_seen_batch_id
+                FROM int_current_hotel_bookings
+                WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
+                ORDER BY booking_key
+                """
+            )
+            fixture_batches = {row[0]: row[1] for row in cursor.fetchall()}
+            print(f"current-state fixture batches: {fixture_batches}")
+            expected_fixture_batches = {
+                "hotel_booking_demand:1": "batch_001_initial",
+                "hotel_booking_demand:2": "batch_005_reverted_state",
+            }
+            for booking_key, expected_batch in expected_fixture_batches.items():
+                actual_batch = fixture_batches.get(booking_key)
+                if actual_batch != expected_batch:
+                    raise AirflowException(
+                        "Current-state fixture validation failed: "
+                        f"{booking_key} expected {expected_batch}, got {actual_batch}"
+                    )
 
 
 default_args = {
@@ -443,7 +442,7 @@ with DAG(
     schedule_interval=None,
     catchup=False,
     max_active_runs=1,
-    tags=["hotel-booking", "iceberg", "scd2", "local-mvp"],
+    tags=["hotel-booking", "iceberg", "current-state", "local-mvp"],
 ) as dag:
     with TaskGroup(group_id="precheck") as precheck:
         check_csv_exists_task = PythonOperator(

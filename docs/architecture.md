@@ -23,35 +23,30 @@ POC này không rebuild full architecture đó.
 
 Architecture local MVP:
 
-```text
-CSV
-  -> MinIO raw
-  -> Spark append-only Bronze Iceberg raw history
-  -> Spark Silver Iceberg tables
-  -> StarRocks external catalog
-  -> dbt views over Iceberg Silver tables
-  -> StarRocks internal Gold fact/dim/marts
-  -> StarRocks Materialized Views for selected aggregations
-  -> Superset dashboard
-```
-
-Mermaid diagram:
-
 ```mermaid
 flowchart LR
-    A[Hotel Booking CSV] --> B[Generate synthetic batches]
-    B --> C[MinIO raw CSV bucket]
-    C --> D[Spark Bronze ingestion]
-    D --> E[Bronze Iceberg raw history]
-    E --> F[Spark Silver build]
-    F --> G[Silver Iceberg dedup/version/current/metrics tables]
-    G --> X[StarRocks external catalog]
-    X --> Y[dbt staging/intermediate views]
-    Y --> H[StarRocks internal Gold fact/dim/mart tables]
-    H --> K[StarRocks Materialized Views]
-    H --> I[Superset datasets]
-    K -. query rewrite optimization .-> I
-    I --> J[Hotel Booking BI Dashboard]
+    A["Local source<br/>hotel_bookings.csv"]
+    B["MinIO raw<br/>partitioned batch CSVs"]
+    C["Bronze Iceberg<br/>raw_hotel_bookings_history"]
+    D["Silver Iceberg<br/>deduped / current / metrics"]
+    E["StarRocks<br/>External Catalog"]
+    F["StarRocks Gold<br/>fact / dim / mart tables"]
+    G["StarRocks MVs<br/>query rewrite"]
+    H["Superset<br/>mart dashboard"]
+
+    A -- "Python generate + upload" --> B
+    B -- "Spark ingest" --> C
+    C -- "Spark build" --> D
+    D -- "StarRocks reads Iceberg" --> E
+    E -- "dbt run/test" --> F
+    F --> H
+    F --> G
+    G -. "rewrite matching queries" .-> H
+
+    O["Airflow DAG<br/>hotel_booking_pipeline"] -. "orchestrates" .-> B
+    O -. "orchestrates" .-> C
+    O -. "orchestrates" .-> F
+    O -. "orchestrates" .-> G
 ```
 
 ## Scope
@@ -63,7 +58,7 @@ Included:
 - Local CSV ingestion.
 - Raw object storage in MinIO.
 - Append-only Bronze Iceberg raw history.
-- Silver Iceberg tables for deduped data, SCD2/version history, current state, and booking metrics.
+- Silver Iceberg tables for deduped data, current state, and booking metrics.
 - StarRocks external catalog for Iceberg.
 - dbt staging/intermediate views over Iceberg Silver tables.
 - Internal StarRocks Gold fact/dim/mart serving tables.
@@ -87,10 +82,10 @@ Not included:
 | --- | --- | --- |
 | Source CSV | `data/input/hotel_bookings.csv` | Local Kaggle dataset used as hospitality BI sample data. |
 | Synthetic batches | Python | Generates deterministic incremental batch CSVs with persisted `booking_key`. |
-| Raw storage | MinIO | Stores immutable raw batch CSVs under Hive-style ingestion partitions such as `hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=01/watermark_date=20260101/raw_batch_sequence=001/`. |
+| Raw storage | MinIO | Stores immutable raw batch CSVs under Hive-style ingestion partitions such as `hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=01/raw_batch_sequence=001/`. |
 | Bronze ingestion | Spark / PySpark | Enforces raw schema, enriches ingestion metadata, computes business-only `record_hash`, and appends to Iceberg. |
 | Bronze lakehouse history | Iceberg | Stores append-only raw history partitioned by `watermark_date`. Physical data format is Parquet managed by Iceberg. |
-| Silver build | Spark / PySpark | Builds deterministic Iceberg tables for exact dedup, SCD2/version history, current state, and booking metrics. |
+| Silver build | Spark / PySpark | Builds deterministic Iceberg tables for exact dedup, current state, and booking metrics. Technical change history stays internal to this layer. |
 | Silver lakehouse tables | Iceberg | Stores physical Silver tables under `iceberg_catalog.hotel_booking_silver`. |
 | External catalog | StarRocks | Queries Bronze/Silver Iceberg tables through `iceberg_catalog`; StarRocks does not own these external table types. |
 | Transformation | dbt + StarRocks | Exposes staging/intermediate views over Bronze/Silver Iceberg tables, runs tests, and materializes Gold fact/dim/mart tables. |
@@ -111,21 +106,20 @@ CSV -> MinIO raw batch CSVs -> Bronze Iceberg raw history -> Silver Iceberg tabl
 
 MinIO is the raw object storage layer. Iceberg stores historical raw batches and physical Silver tables. StarRocks reads Iceberg through external catalog. dbt keeps staging/intermediate objects as StarRocks views over Iceberg and materializes only Gold fact/dim/mart serving objects as internal StarRocks tables.
 
-## SCD2, Dedup, And Incremental Logic
+## Dedup, Current-State, And Incremental Logic
 
 - `booking_key = source_dataset + original_source_row_number` is generated once by the batch generator and persisted in every generated batch.
-- Raw batch files are stored in MinIO using ingestion partition folders: `etl_year`, `etl_month`, `etl_day`, `watermark_date`, and `raw_batch_sequence`.
+- Raw batch files are stored in MinIO using ingestion partition folders: `etl_year`, `etl_month`, `etl_day`, and `raw_batch_sequence`.
 - These raw partition fields are for storage organization and replay/debug. They do not replace `booking_key`, `batch_id`, `batch_sequence`, or `batch_effective_at`.
 - Bronze Iceberg `raw_hotel_bookings_history` is partitioned by `watermark_date` to match daily batch access and pruning.
 - Iceberg warehouse file layout is managed by Iceberg metadata; lineage should be inspected through SQL columns such as `source_object_path`, `file_hash`, and `watermark_date`, not by manually reading Parquet folder paths.
 - Spark computes `record_hash` from normalized business columns only. Ingestion metadata and derived metrics are excluded from the hash.
 - Spark Silver build exact dedup collapses duplicate rows by `booking_key + batch_id + record_hash`.
-- Spark Silver build applies the SCD Type 2 versioning technique by ordering records by `booking_key`, `batch_sequence`, and `batch_effective_at`.
-- Version history is built from change records only. Consecutive same `record_hash` values are compressed into one version.
-- `valid_from = batch_effective_at`; `valid_to` is calculated with `LEAD(valid_from)` over change records.
-- The current Silver table keeps only the latest `is_current = 1` version per `booking_key`.
-- dbt exposes the Silver tables as views and validates constraints such as one current version per `booking_key`, no overlapping SCD2 periods, and fixture behavior.
-- SCD2 is a versioning/storage technique, not a separate business layer. In this MVP, the physical version table is `iceberg_catalog.hotel_booking_silver.hotel_booking_versions`; `hotel_booking.int_hotel_booking_versions` is a StarRocks view over it for tests and downstream consistency.
+- Spark Silver build derives current state by ordering records by `booking_key`, `batch_sequence`, and `batch_effective_at`.
+- Consecutive same `record_hash` values are skipped before current-state selection.
+- The current Silver table keeps only the latest changed business state per `booking_key`.
+- dbt exposes the Silver tables as views and validates constraints such as one current row per `booking_key`, no multiple business states per batch, and fixture behavior.
+- There is no separate business layer/table/model for change tracking/history in this MVP. Change detection is embedded in the Spark Silver current-state build.
 
 ## StarRocks Table Type Note
 
@@ -133,12 +127,10 @@ MinIO is the raw object storage layer. Iceberg stores historical raw batches and
 | --- | --- | --- |
 | Bronze `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` | Iceberg external table | Not applicable |
 | Silver `iceberg_catalog.hotel_booking_silver.deduped_hotel_bookings` | Iceberg external table | Not applicable |
-| Silver `iceberg_catalog.hotel_booking_silver.hotel_booking_versions` | Iceberg external table for SCD2/version history | Not applicable |
 | Silver `iceberg_catalog.hotel_booking_silver.current_hotel_bookings` | Iceberg external table | Not applicable |
 | Silver `iceberg_catalog.hotel_booking_silver.booking_metrics` | Iceberg external table | Not applicable |
 | `stg_iceberg_raw_hotel_bookings` | StarRocks view over Bronze Iceberg raw history | View, no table type |
 | `int_hotel_bookings_deduped` | StarRocks view over Silver Iceberg table | View, no StarRocks table type |
-| `int_hotel_booking_versions` | StarRocks view over Silver SCD2/version table | View, no StarRocks table type |
 | `int_current_hotel_bookings` current model | StarRocks view over Silver current table | View, no StarRocks table type |
 | `int_booking_metrics` | StarRocks view over Silver metrics table | View, no StarRocks table type |
 | `fact_bookings` | StarRocks internal Gold dbt table | `PRIMARY KEY(booking_key)` |

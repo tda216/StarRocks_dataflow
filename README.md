@@ -15,27 +15,32 @@ POC này tập trung vào **functional feasibility** và **architecture design**
 
 ```mermaid
 flowchart LR
-    A["Hotel Booking CSV"] --> B["Synthetic Batch Generator"]
-    B --> C["MinIO raw bucket<br/>partitioned by etl_date / watermark"]
-    C --> D["Spark Bronze ingestion"]
-    D --> E["Bronze Iceberg<br/>raw_hotel_bookings_history<br/>append-only raw history"]
-    E --> F["Spark Silver build"]
-    F --> G["Silver Iceberg<br/>dedup / SCD2 versions / current / metrics"]
-    G --> H["StarRocks External Catalog<br/>iceberg_catalog"]
-    H --> I["dbt Views<br/>over Iceberg Bronze/Silver"]
-    I --> J["StarRocks Internal Gold<br/>fact / dim / mart"]
-    J --> K["StarRocks Materialized Views<br/>query rewrite"]
-    J --> L["Superset Dashboard<br/>mart tables only"]
-    K -. "query rewrite optimization" .-> L
+    A["Original CSV"]
+    B["MinIO raw<br/>partitioned batch"]
+    C["Bronze Iceberg<br/>raw_history"]
+    D["Silver Iceberg<br/>deduped / current / metrics"]
+    E["StarRocks<br/>External Catalog"]
+    F["StarRocks Gold<br/>fact / dim / mart tables"]
+    G["StarRocks MVs<br/>query rewrite"]
+    H["Superset<br/>mart dashboard"]
+
+    A -- "Python generate + upload" --> B
+    B -- "Spark ingest" --> C
+    C -- "Spark build" --> D
+    D -- "StarRocks reads Iceberg" --> E
+    E -- "dbt run/test" --> F
+    F --> H
+    F --> G
+    G -. "query rewrite" .-> H
 ```
 
 | Layer | Tool / Format | Storage / Object | Responsibility |
 | --- | --- | --- | --- |
 | Source | CSV | `data/input/hotel_bookings.csv` | Original Kaggle dataset. |
-| Synthetic batch layer | Python-generated CSV | `data/input/incremental_batches/batch_*.csv` | Generate deterministic incremental batches with persisted `booking_key`, updates, duplicate replay and SCD2 fixtures. |
-| Raw landing | MinIO / CSV | `hotel-booking-raw/.../etl_year=.../watermark_date=.../raw_batch_sequence=.../batch_*.csv` | Immutable raw batch files for replay, audit and debug. |
+| Synthetic batch layer | Python-generated CSV | `data/input/incremental_batches/batch_*.csv` | Generate deterministic incremental batches with persisted `booking_key`, updates, duplicate replay and edge-case fixtures. |
+| Raw landing | MinIO / CSV | `hotel-booking-raw/.../etl_year=.../etl_month=.../etl_day=.../raw_batch_sequence=.../batch_*.csv` | Immutable raw batch files for replay, audit and debug. |
 | Bronze lakehouse | Iceberg / Parquet on MinIO | `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` | Append-only raw historical records, partitioned by `watermark_date`. |
-| Silver lakehouse | Iceberg / Parquet on MinIO | `iceberg_catalog.hotel_booking_silver.*` | Physical dedup, SCD2/version history, current state and metrics tables built by Spark. |
+| Silver lakehouse | Iceberg / Parquet on MinIO | `iceberg_catalog.hotel_booking_silver.*` | Physical dedup, current state and metrics tables built by Spark. |
 | External catalog | StarRocks External Catalog | `iceberg_catalog` | StarRocks reads Iceberg tables without owning their storage or table type. |
 | dbt staging/intermediate | dbt + StarRocks views | `stg_*`, `int_*` | Expose Bronze/Silver Iceberg objects as StarRocks views and run validation tests. |
 | Gold serving | StarRocks internal tables | `fact_bookings`, `dim_*`, `mart_*` | Materialized dbt serving layer for BI. |
@@ -79,16 +84,15 @@ hotel-booking-raw/
       etl_year=2026/
         etl_month=01/
           etl_day=01/
-            watermark_date=20260101/
-              raw_batch_sequence=001/
-                batch_001_initial.csv
+            raw_batch_sequence=001/
+              batch_001_initial.csv
 ```
 
 Lý do dùng partition path:
 
 - dễ audit batch nào được ingest vào ngày nào
 - dễ replay/debug từng batch
-- dễ cleanup/retention theo `etl_date` hoặc `watermark_date`
+- dễ cleanup/retention theo `etl_year/etl_month/etl_day`
 - tránh lưu raw files trong một flat folder khó quản lý
 
 Current generated batch files:
@@ -98,8 +102,8 @@ Current generated batch files:
 | `batch_001_initial.csv` | Initial business state | 119,390 |
 | `batch_002_updates.csv` | Selected changed records, exact duplicates and new records | 17 |
 | `batch_003_duplicate_replay.csv` | Replay duplicates to test idempotency | 15 |
-| `batch_004_same_state.csv` | `A -> A -> A` fixture, expected 1 SCD2 version | 1 |
-| `batch_005_reverted_state.csv` | `A -> B -> A` fixture, expected 3 SCD2 versions | 1 |
+| `batch_004_same_state.csv` | `A -> A -> A` fixture, duplicate/same-state replay should not inflate current/fact/mart counts | 1 |
+| `batch_005_reverted_state.csv` | `A -> B -> A` fixture, reverted business state should still be detected deterministically | 1 |
 
 ## 4. Iceberg Storage
 
@@ -125,13 +129,12 @@ Bronze table giữ toàn bộ raw history theo batch. Đây là nơi phục vụ
 | Table | Purpose |
 | --- | --- |
 | `deduped_hotel_bookings` | Exact duplicate collapse by `booking_key + batch_id + record_hash` |
-| `hotel_booking_versions` | SCD Type 2 / version history from change records only |
-| `current_hotel_bookings` | Latest `is_current = 1` version per `booking_key` |
+| `current_hotel_bookings` | Latest business state per `booking_key`; change detection is handled inside this build step |
 | `booking_metrics` | Typed, cleaned metrics table with derived fields for Gold dbt models |
 
 Silver tables là physical Iceberg tables được build bởi Spark. Việc để Silver ở Iceberg giúp phát huy ưu điểm của lakehouse: lưu intermediate/checkpoint data ngoài StarRocks internal storage, giảm áp lực SSD/storage cho StarRocks, đồng thời giữ khả năng audit/replay.
 
-## 5. Incremental, Dedup & SCD2 Logic
+## 5. Incremental, Dedup & Current-State Logic
 
 ### 5.1 Stable Key
 
@@ -169,33 +172,31 @@ Silver exact dedup loại duplicate/replay records theo key:
 booking_key + batch_id + record_hash
 ```
 
-Logic này chỉ remove duplicate trong cùng batch, không global dedup theo `booking_key + record_hash`, vì case `A -> B -> A` vẫn phải được giữ lại để tạo đúng 3 SCD2 versions.
+Logic này chỉ remove duplicate trong cùng batch, không global dedup theo `booking_key + record_hash`, vì case `A -> B -> A` vẫn phải được giữ lại để detect reverted business state đúng.
 
-### 5.4 SCD2 / Version History
+### 5.4 Current-State Derivation
 
-SCD2 là **versioning/storage technique**, không phải một business layer riêng trong dbt.
+POC này không triển khai một business layer hoặc model riêng cho change tracking/history. Logic này được gộp vào bước build `current_hotel_bookings` để xác định bản hiện tại.
 
 Trong POC này:
 
-- Spark Silver build physical version table: `iceberg_catalog.hotel_booking_silver.hotel_booking_versions`
-- dbt expose table này thành StarRocks view: `hotel_booking.int_hotel_booking_versions`
-- view này dùng cho dbt tests và downstream Gold models
+- Spark Silver build xác định latest business state bằng `booking_key`, `batch_sequence`, `batch_effective_at`, và `record_hash`
+- không materialize table/model change-history riêng
+- dashboard và marts chỉ đi từ current/metrics/fact/mart
 
-SCD2 logic:
+Current-state logic:
 
 - order records by `booking_key`, `batch_sequence`, `batch_effective_at`
 - detect change bằng `LAG(record_hash)`
-- consecutive same `record_hash` values được compress thành một version
-- `valid_from = batch_effective_at`
-- `valid_to = LEAD(valid_from)` over change records
-- `is_current = valid_to IS NULL`
+- consecutive same `record_hash` values được bỏ qua trước khi chọn current row
+- latest changed business state được chọn bằng `ROW_NUMBER() ... ORDER BY batch_sequence DESC, batch_effective_at DESC`
 
 Expected behavior:
 
 | Case | Expected behavior |
 | --- | --- |
-| `A -> A -> A` | 1 version |
-| `A -> B -> A` | 3 versions |
+| `A -> A -> A` | Same-state replay không làm tăng current/fact/mart counts |
+| `A -> B -> A` | Reverted business state vẫn được detect deterministically |
 | Duplicate replay | Không làm tăng current/fact/mart counts |
 | Same `booking_key + batch_id` nhưng nhiều `record_hash` | Validation fails |
 
@@ -218,7 +219,6 @@ MinIO raw CSV
 | --- | --- | --- | --- |
 | `stg_iceberg_raw_hotel_bookings` | View | Bronze Iceberg raw history | Expose raw history with typed metadata |
 | `int_hotel_bookings_deduped` | View | Silver `deduped_hotel_bookings` | Expose deduped records |
-| `int_hotel_booking_versions` | View | Silver `hotel_booking_versions` | Expose version history/SCD2 result |
 | `int_current_hotel_bookings` | View | Silver `current_hotel_bookings` | Expose current state |
 | `int_booking_metrics` | View | Silver `booking_metrics` | Expose cleaned metrics for Gold models |
 | `fact_bookings` | Internal table | `int_booking_metrics` | Booking-level Gold fact, stable by `booking_key` |
@@ -242,7 +242,7 @@ Note về `dim_*`:
 
 - Current MVP dùng `DUPLICATE KEY` cho `dim_*` vì dimension tables nhỏ, được full-refresh và uniqueness do dbt kiểm soát.
 - Nếu production hoặc muốn semantic chặt hơn, stable current dimensions nên dùng `PRIMARY KEY(dimension_key)`.
-- Historical/SCD dimensions nên dùng grain kiểu `natural_key + valid_from`.
+- Historical dimensions chưa nằm trong scope MVP này.
 
 ## 8. Airflow Pipeline
 
@@ -300,10 +300,9 @@ Superset không nằm trong Airflow DAG vì Superset là BI serving/consumer lay
 | Bronze row count | Airflow compares generated CSV row count with Iceberg raw history count by `batch_id` |
 | Silver tables | Airflow checks Silver Iceberg tables are visible from StarRocks and non-empty |
 | Multiple states per batch | dbt custom tests fail if one `booking_key + batch_id` has multiple distinct `record_hash` |
-| Duplicate current version | dbt custom test checks only one current version per `booking_key` |
-| SCD2 overlap | dbt custom test checks no overlapping validity periods |
-| Fixture behavior | dbt tests validate `A -> A -> A = 1 version` and `A -> B -> A = 3 versions` |
-| dbt result | Current validation: `dbt run` passed `24/24`, `dbt test` passed `86/86` |
+| Current-state row count | dbt custom test checks current row count equals distinct `booking_key` count |
+| Fixture behavior | dbt tests validate `A -> A -> A` keeps initial current state and `A -> B -> A` ends with reverted current state |
+| dbt result | `dbt run` and `dbt test` must pass after Silver tables are rebuilt |
 | MV validation | Checks MV exists, active, `query_rewrite_status = VALID`, totals match marts, and `EXPLAIN` uses `mv_daily_booking_revenue` |
 
 Current row count snapshot:
@@ -312,7 +311,6 @@ Current row count snapshot:
 | --- | ---: |
 | Bronze raw history | 119,424 |
 | Silver `deduped_hotel_bookings` | 119,422 |
-| Silver `hotel_booking_versions` | 119,405 |
 | Silver `current_hotel_bookings` | 119,395 |
 | Silver `booking_metrics` | 119,395 |
 | Gold `fact_bookings` | 119,395 |
@@ -362,7 +360,7 @@ Do not use:
 
 - raw tables
 - staging/intermediate views
-- SCD2/version history tables
+- technical change-history tables
 - fact table
 - dimension tables
 
@@ -395,7 +393,7 @@ So với MVP ban đầu chỉ load CSV vào StarRocks, flow hiện tại product
 
 - raw batch files được lưu immutable trên MinIO
 - Iceberg quản lý Bronze/Silver historical and intermediate tables
-- Spark xử lý ingestion, dedup, SCD2/versioning, current state và metrics ở lakehouse layer
+- Spark xử lý ingestion, dedup, current state và metrics ở lakehouse layer
 - StarRocks đọc Iceberg qua External Catalog
 - dbt expose Silver bằng views và materialize Gold fact/dim/mart internal tables
 - Superset chỉ đọc mart tables

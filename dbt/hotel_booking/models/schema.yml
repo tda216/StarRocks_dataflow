@@ -55,25 +55,6 @@ models:
         tests:
           - not_null
 
-  - name: int_hotel_booking_versions
-    description: StarRocks view over Silver Iceberg hotel_booking_versions. This exposes the SCD Type 2/version history table for dbt tests and downstream Gold models.
-    columns:
-      - name: booking_key
-        tests:
-          - not_null
-      - name: valid_from
-        tests:
-          - not_null
-      - name: is_current
-        tests:
-          - not_null
-          - accepted_values:
-              values: [0, 1]
-              quote: false
-      - name: record_hash
-        tests:
-          - not_null
-
   - name: int_current_hotel_bookings
     description: StarRocks view over Silver Iceberg current_hotel_bookings. Contains cleaned and typed latest business state per booking_key.
     columns:
@@ -97,7 +78,7 @@ models:
     description: StarRocks view over Silver Iceberg booking_metrics. Contains current booking-level derived metrics and analysis buckets.
     columns:
       - name: booking_key
-        description: Stable booking key used by version/current/fact models.
+        description: Stable booking key used by current/fact models.
         tests:
           - not_null
           - unique

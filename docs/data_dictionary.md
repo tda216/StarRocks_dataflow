@@ -73,12 +73,11 @@ When uploaded to MinIO raw storage, batch files use Hive-style ingestion partiti
 
 ```text
 hotel_booking_demand/incremental_batches/
-  etl_year=2026/
-    etl_month=01/
-      etl_day=01/
-        watermark_date=20260101/
-          raw_batch_sequence=001/
-            batch_001_initial.csv
+      etl_year=2026/
+        etl_month=01/
+          etl_day=01/
+            raw_batch_sequence=001/
+              batch_001_initial.csv
 ```
 
 Stable key:
@@ -97,14 +96,14 @@ Metadata columns:
 | `original_source_row_number` | Stable row number from the original Kaggle CSV. |
 | `booking_key` | Stable synthetic key for this POC. |
 | `batch_id` | Deterministic batch identifier, for example `batch_001_initial`. |
-| `batch_sequence` | Numeric batch order for SCD2. |
-| `batch_effective_at` | Deterministic effective timestamp used as SCD2 `valid_from`. |
+| `batch_sequence` | Numeric batch order for deterministic current-state derivation. |
+| `batch_effective_at` | Deterministic effective timestamp used for current-state ordering. |
 | `batch_row_number` | Row order inside the generated batch file. |
 | `synthetic_operation` | Demo label such as `initial`, `update`, `duplicate_replay`, or fixture operation. |
 | `etl_year` | Raw landing partition year from `batch_effective_at`. |
 | `etl_month` | Raw landing partition month from `batch_effective_at`. |
 | `etl_day` | Raw landing partition day from `batch_effective_at`. |
-| `watermark_date` | Raw landing watermark in `yyyyMMdd` format. |
+| `watermark_date` | Deterministic watermark date in `yyyyMMdd` format. Stored as metadata and Iceberg partition, not as a raw MinIO folder. |
 | `raw_batch_sequence` | Zero-padded sequence used in the raw object path. |
 
 ## Iceberg Raw History
@@ -128,7 +127,7 @@ Additional ingestion metadata:
 | `raw_batch_sequence` | Zero-padded batch sequence from raw object path. |
 | `file_hash` | SHA-256 hash of the local batch file content. |
 | `record_hash` | SHA-256 hash of normalized business columns only. |
-| `ingested_at` | Physical ingestion timestamp. Not used for SCD2 validity. |
+| `ingested_at` | Physical ingestion timestamp. Not used for business validity. |
 | `row_ingestion_id` | Deterministic row ingestion identifier. |
 
 `record_hash` excludes ingestion metadata and derived metrics. It is used by dbt to detect business changes.
@@ -139,7 +138,6 @@ Silver Iceberg tables:
 
 ```text
 iceberg_catalog.hotel_booking_silver.deduped_hotel_bookings
-iceberg_catalog.hotel_booking_silver.hotel_booking_versions
 iceberg_catalog.hotel_booking_silver.current_hotel_bookings
 iceberg_catalog.hotel_booking_silver.booking_metrics
 ```
@@ -148,38 +146,27 @@ Spark builds these physical Silver tables from Bronze raw history:
 
 | Table | Grain | Purpose |
 | --- | --- | --- |
-| `deduped_hotel_bookings` | one row per `booking_key + batch_id + record_hash` | Removes exact duplicate/replay rows while keeping valid A -> B -> A history. |
-| `hotel_booking_versions` | one row per business version of a `booking_key` | Stores SCD Type 2/version history from change records only. |
-| `current_hotel_bookings` | one current row per `booking_key` | Stores cleaned and typed latest business state. |
+| `deduped_hotel_bookings` | one row per `booking_key + batch_id + record_hash` | Removes exact duplicate/replay rows while keeping valid A -> B -> A change detection. |
+| `current_hotel_bookings` | one current row per `booking_key` | Stores cleaned and typed latest business state. Change detection is handled inside this Spark build step. |
 | `booking_metrics` | one current booking row with derived metrics | Adds revenue, guest, stay length, lead time, and analysis bucket metrics. |
 
 dbt exposes these Silver tables through StarRocks views:
 
 ```text
 hotel_booking.int_hotel_bookings_deduped
-hotel_booking.int_hotel_booking_versions
 hotel_booking.int_current_hotel_bookings
 hotel_booking.int_booking_metrics
 ```
 
-SCD2 is a storage/versioning technique here, not a separate business layer. The physical version history lives in Iceberg Silver; the dbt `int_hotel_booking_versions` object is a view used for validation and downstream Gold models.
+There is no separate business layer/table/model for change tracking/history in this MVP. Change detection is embedded in the Spark Silver `current_hotel_bookings` build.
 
-## SCD2 Fields
-
-Physical SCD2/version table:
-
-```text
-iceberg_catalog.hotel_booking_silver.hotel_booking_versions
-```
+## Current-State Metadata
 
 | Column | Meaning |
 | --- | --- |
-| `record_hash` | Business-only hash used consistently across raw history, dedup, SCD2, current, and fact models. |
-| `valid_from` | Equal to deterministic `batch_effective_at`. |
-| `valid_to` | Next change record `valid_from`; `NULL` for current record. |
-| `is_current` | `1` for latest version per `booking_key`, else `0`. |
-| `first_seen_batch_id` | Batch that produced the SCD2 version. |
-| `first_seen_batch_sequence` | Sequence of the batch that produced the SCD2 version. |
+| `record_hash` | Business-only hash used consistently across raw history, dedup, current, and fact models. |
+| `first_seen_batch_id` | Batch that produced the current business state. |
+| `first_seen_batch_sequence` | Sequence of the batch that produced the current business state. |
 
 ## Cleaned Fields
 

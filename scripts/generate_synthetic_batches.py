@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate deterministic incremental CSV batches for SCD2/dedup demos."""
+"""Generate deterministic incremental CSV batches for dedup/current-state demos."""
 
 from __future__ import annotations
 

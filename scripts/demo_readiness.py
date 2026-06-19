@@ -36,7 +36,6 @@ EXPECTED_BATCH_IDS = {
 EXPECTED_STARROCKS_OBJECTS = [
     "stg_iceberg_raw_hotel_bookings",
     "int_hotel_bookings_deduped",
-    "int_hotel_booking_versions",
     "int_current_hotel_bookings",
     "int_booking_metrics",
     "fact_bookings",
@@ -67,7 +66,6 @@ EXPECTED_MATERIALIZED_VIEWS = {
 
 EXPECTED_SILVER_TABLES = [
     "deduped_hotel_bookings",
-    "hotel_booking_versions",
     "current_hotel_bookings",
     "booking_metrics",
 ]
@@ -204,7 +202,7 @@ def check_minio(report: DemoReport) -> None:
             for obj in batch_objects
             if all(
                 marker in obj.object_name
-                for marker in ("etl_year=", "etl_month=", "etl_day=", "watermark_date=", "raw_batch_sequence=")
+                for marker in ("etl_year=", "etl_month=", "etl_day=", "raw_batch_sequence=")
             )
         ]
         legacy_objects = [obj for obj in batch_objects if obj not in partitioned_objects]
@@ -301,9 +299,8 @@ def check_iceberg_silver_tables(report: DemoReport, cursor: pymysql.cursors.Curs
     database = env("ICEBERG_SILVER_DATABASE", "hotel_booking_silver")
     expected_tables = [
         env("ICEBERG_SILVER_DEDUPED_TABLE", EXPECTED_SILVER_TABLES[0]),
-        env("ICEBERG_SILVER_VERSIONS_TABLE", EXPECTED_SILVER_TABLES[1]),
-        env("ICEBERG_SILVER_CURRENT_TABLE", EXPECTED_SILVER_TABLES[2]),
-        env("ICEBERG_SILVER_METRICS_TABLE", EXPECTED_SILVER_TABLES[3]),
+        env("ICEBERG_SILVER_CURRENT_TABLE", EXPECTED_SILVER_TABLES[1]),
+        env("ICEBERG_SILVER_METRICS_TABLE", EXPECTED_SILVER_TABLES[2]),
     ]
 
     try:
@@ -363,8 +360,8 @@ def check_dbt_objects(report: DemoReport, cursor: pymysql.cursors.Cursor) -> Non
     print_rows(["table_name", "row_count"], count_rows)
 
 
-def check_scd2_validations(report: DemoReport, cursor: pymysql.cursors.Cursor) -> None:
-    report.section("Dedup and SCD2 Validation")
+def check_current_state_validations(report: DemoReport, cursor: pymysql.cursors.Cursor) -> None:
+    report.section("Dedup and Current-State Validation")
     database = env("STARROCKS_DATABASE", "hotel_booking")
 
     checks = {
@@ -377,28 +374,11 @@ def check_scd2_validations(report: DemoReport, cursor: pymysql.cursors.Cursor) -
                 HAVING COUNT(DISTINCT record_hash) > 1
             ) invalid_batches
         """,
-        "duplicate_current_versions": f"""
-            SELECT COUNT(*)
-            FROM (
-                SELECT booking_key
-                FROM `{database}`.`int_hotel_booking_versions`
-                WHERE is_current = 1
-                GROUP BY booking_key
-                HAVING COUNT(*) > 1
-            ) duplicate_current
-        """,
-        "overlapping_scd2_periods": f"""
-            SELECT COUNT(*)
-            FROM (
-                SELECT a.booking_key
-                FROM `{database}`.`int_hotel_booking_versions` a
-                JOIN `{database}`.`int_hotel_booking_versions` b
-                  ON a.booking_key = b.booking_key
-                 AND a.valid_from < COALESCE(b.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
-                 AND b.valid_from < COALESCE(a.valid_to, CAST('9999-12-31 00:00:00' AS DATETIME))
-                 AND a.valid_from <> b.valid_from
-                LIMIT 1
-            ) overlap_check
+        "current_rows_vs_distinct_booking_keys": f"""
+            SELECT ABS(
+                (SELECT COUNT(*) FROM `{database}`.`int_current_hotel_bookings`)
+              - (SELECT COUNT(DISTINCT booking_key) FROM `{database}`.`stg_iceberg_raw_hotel_bookings`)
+            )
         """,
     }
 
@@ -410,22 +390,24 @@ def check_scd2_validations(report: DemoReport, cursor: pymysql.cursors.Cursor) -
 
     cursor.execute(
         f"""
-        SELECT booking_key, COUNT(*) AS version_count
-        FROM `{database}`.`int_hotel_booking_versions`
+        SELECT booking_key, first_seen_batch_id
+        FROM `{database}`.`int_current_hotel_bookings`
         WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
-        GROUP BY booking_key
         ORDER BY booking_key
         """
     )
     rows = cursor.fetchall()
-    print_rows(["booking_key", "version_count"], rows)
-    fixture_counts = {row[0]: int(row[1]) for row in rows}
-    expected_fixture_counts = {"hotel_booking_demand:1": 1, "hotel_booking_demand:2": 3}
-    for booking_key, expected_count in expected_fixture_counts.items():
-        actual_count = fixture_counts.get(booking_key)
-        if actual_count != expected_count:
+    print_rows(["booking_key", "first_seen_batch_id"], rows)
+    fixture_batches = {row[0]: row[1] for row in rows}
+    expected_fixture_batches = {
+        "hotel_booking_demand:1": "batch_001_initial",
+        "hotel_booking_demand:2": "batch_005_reverted_state",
+    }
+    for booking_key, expected_batch in expected_fixture_batches.items():
+        actual_batch = fixture_batches.get(booking_key)
+        if actual_batch != expected_batch:
             report.fail(
-                f"SCD2 fixture mismatch for {booking_key}: expected={expected_count}, actual={actual_count}"
+                f"Current-state fixture mismatch for {booking_key}: expected={expected_batch}, actual={actual_batch}"
             )
 
 
@@ -537,7 +519,7 @@ def main() -> int:
                 check_iceberg_history(report, cursor)
                 check_iceberg_silver_tables(report, cursor)
                 check_dbt_objects(report, cursor)
-                check_scd2_validations(report, cursor)
+                check_current_state_validations(report, cursor)
                 check_materialized_views(report, cursor)
                 check_query_rewrite(report, cursor)
     except Exception as exc:
