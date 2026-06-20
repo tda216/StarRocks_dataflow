@@ -405,7 +405,7 @@ def log_validation_counts() -> None:
 
             cursor.execute(
                 """
-                SELECT booking_key, first_seen_batch_id
+                SELECT booking_key, current_batch_id
                 FROM int_current_hotel_bookings
                 WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
                 ORDER BY booking_key
@@ -414,7 +414,7 @@ def log_validation_counts() -> None:
             fixture_batches = {row[0]: row[1] for row in cursor.fetchall()}
             print(f"current-state fixture batches: {fixture_batches}")
             expected_fixture_batches = {
-                "hotel_booking_demand:1": "batch_001_initial",
+                "hotel_booking_demand:1": "batch_004_same_state",
                 "hotel_booking_demand:2": "batch_005_reverted_state",
             }
             for booking_key, expected_batch in expected_fixture_batches.items():

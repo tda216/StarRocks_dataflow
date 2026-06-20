@@ -84,7 +84,7 @@ Not included:
 | Synthetic batches | Python | Generates deterministic incremental batch CSVs with persisted `booking_key`. |
 | Raw storage | MinIO | Stores immutable raw batch CSVs under Hive-style ingestion partitions such as `hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=01/raw_batch_sequence=001/`. |
 | Bronze ingestion | Spark / PySpark | Enforces raw schema, enriches ingestion metadata, computes business-only `record_hash`, and appends to Iceberg. |
-| Bronze lakehouse history | Iceberg | Stores append-only raw history partitioned by `watermark_date`. Physical data format is Parquet managed by Iceberg. |
+| Bronze lakehouse history | Iceberg | Stores append-only raw history partitioned by `etl_date`. Physical data format is Parquet managed by Iceberg. |
 | Silver build | Spark / PySpark | Builds deterministic Iceberg tables for exact dedup, current state, and booking metrics. Technical change history stays internal to this layer. |
 | Silver lakehouse tables | Iceberg | Stores physical Silver tables under `iceberg_catalog.hotel_booking_silver`. |
 | External catalog | StarRocks | Queries Bronze/Silver Iceberg tables through `iceberg_catalog`; StarRocks does not own these external table types. |
@@ -111,15 +111,16 @@ MinIO is the raw object storage layer. Iceberg stores historical raw batches and
 - `booking_key = source_dataset + original_source_row_number` is generated once by the batch generator and persisted in every generated batch.
 - Raw batch files are stored in MinIO using ingestion partition folders: `etl_year`, `etl_month`, `etl_day`, and `raw_batch_sequence`.
 - These raw partition fields are for storage organization and replay/debug. They do not replace `booking_key`, `batch_id`, `batch_sequence`, or `batch_effective_at`.
-- Bronze Iceberg `raw_hotel_bookings_history` is partitioned by `watermark_date` to match daily batch access and pruning.
-- Iceberg warehouse file layout is managed by Iceberg metadata; lineage should be inspected through SQL columns such as `source_object_path`, `file_hash`, and `watermark_date`, not by manually reading Parquet folder paths.
+- Bronze Iceberg `raw_hotel_bookings_history` is partitioned by `etl_date` to match daily batch access and pruning.
+- Iceberg warehouse file layout is managed by Iceberg metadata; lineage should be inspected through SQL columns such as `source_object_path`, `file_hash`, and `etl_date`, not by manually reading Parquet folder paths.
+- Silver Iceberg tables may contain many Parquet files. The pipeline does not depend on Parquet filename order; Iceberg snapshots/manifests control which files belong to the table state.
 - Spark computes `record_hash` from normalized business columns only. Ingestion metadata and derived metrics are excluded from the hash.
 - Spark Silver build exact dedup collapses duplicate rows by `booking_key + batch_id + record_hash`.
 - Spark Silver build derives current state by ordering records by `booking_key`, `batch_sequence`, and `batch_effective_at`.
-- Consecutive same `record_hash` values are skipped before current-state selection.
-- The current Silver table keeps only the latest changed business state per `booking_key`.
+- Current-state selection does not compare with previous `record_hash`; the latest loaded record wins after exact dedup.
+- The current Silver table keeps only the latest loaded record per `booking_key`.
 - dbt exposes the Silver tables as views and validates constraints such as one current row per `booking_key`, no multiple business states per batch, and fixture behavior.
-- There is no separate business layer/table/model for change tracking/history in this MVP. Change detection is embedded in the Spark Silver current-state build.
+- There is no separate business layer/table/model for change tracking/history in this MVP. `record_hash` is kept for dedup and validation, not for choosing current.
 
 ## StarRocks Table Type Note
 

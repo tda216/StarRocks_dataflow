@@ -13,7 +13,7 @@ SELECT
     COALESCE(CAST(etl_year AS INT), YEAR(CAST(batch_effective_at AS DATETIME))) AS etl_year,
     COALESCE(CAST(etl_month AS INT), MONTH(CAST(batch_effective_at AS DATETIME))) AS etl_month,
     COALESCE(CAST(etl_day AS INT), DAYOFMONTH(CAST(batch_effective_at AS DATETIME))) AS etl_day,
-    COALESCE(watermark_date, DATE_FORMAT(CAST(batch_effective_at AS DATETIME), '%Y%m%d')) AS watermark_date,
+    COALESCE(etl_date, DATE_FORMAT(CAST(batch_effective_at AS DATETIME), '%Y%m%d')) AS etl_date,
     COALESCE(raw_batch_sequence, LPAD(CAST(batch_sequence AS VARCHAR), 3, '0')) AS raw_batch_sequence,
     source_file_name,
     source_object_path,

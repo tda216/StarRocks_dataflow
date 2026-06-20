@@ -52,7 +52,7 @@ RAW_METADATA_COLUMNS = [
     "etl_year",
     "etl_month",
     "etl_day",
-    "watermark_date",
+    "etl_date",
     "raw_batch_sequence",
     "source_file_name",
     "source_object_path",
@@ -67,13 +67,13 @@ CURRENT_COLUMNS = [
     "booking_key",
     "source_dataset",
     "original_source_row_number",
-    "first_seen_batch_id",
-    "first_seen_batch_sequence",
+    "current_batch_id",
+    "current_batch_sequence",
     "batch_effective_at",
     "etl_year",
     "etl_month",
     "etl_day",
-    "watermark_date",
+    "etl_date",
     "raw_batch_sequence",
     "record_hash",
     "source_file_name",
@@ -123,12 +123,12 @@ METRIC_COLUMNS = [
     "booking_id",
     "source_dataset",
     "original_source_row_number",
-    "first_seen_batch_id",
-    "first_seen_batch_sequence",
+    "current_batch_id",
+    "current_batch_sequence",
     "etl_year",
     "etl_month",
     "etl_day",
-    "watermark_date",
+    "etl_date",
     "raw_batch_sequence",
     "record_hash",
     "hotel",
@@ -190,8 +190,8 @@ def raw_history_projection() -> str:
             expressions.append("COALESCE(etl_month, MONTH(batch_effective_at)) AS etl_month")
         elif column == "etl_day":
             expressions.append("COALESCE(etl_day, DAYOFMONTH(batch_effective_at)) AS etl_day")
-        elif column == "watermark_date":
-            expressions.append("COALESCE(watermark_date, DATE_FORMAT(batch_effective_at, 'yyyyMMdd')) AS watermark_date")
+        elif column == "etl_date":
+            expressions.append("COALESCE(etl_date, DATE_FORMAT(batch_effective_at, 'yyyyMMdd')) AS etl_date")
         elif column == "raw_batch_sequence":
             expressions.append("COALESCE(raw_batch_sequence, LPAD(CAST(batch_sequence AS STRING), 3, '0')) AS raw_batch_sequence")
         else:
@@ -266,42 +266,27 @@ def build_silver_tables() -> None:
             spark,
             current,
             f"""
-            WITH ordered_records AS (
-                SELECT
-                    *,
-                    LAG(record_hash) OVER (
-                        PARTITION BY booking_key
-                        ORDER BY batch_sequence, batch_effective_at, row_ingestion_id
-                    ) AS previous_record_hash
-                FROM {deduped}
-            ),
-            change_records AS (
-                SELECT *
-                FROM ordered_records
-                WHERE previous_record_hash IS NULL
-                   OR record_hash <> previous_record_hash
-            ),
-            current_records AS (
+            WITH current_records AS (
                 SELECT
                     *,
                     ROW_NUMBER() OVER (
                         PARTITION BY booking_key
-                        ORDER BY batch_sequence DESC, batch_effective_at DESC, row_ingestion_id DESC
+                        ORDER BY batch_sequence DESC, batch_effective_at DESC, batch_row_number DESC, row_ingestion_id DESC
                     ) AS current_rank
-                FROM change_records
+                FROM {deduped}
             ),
             cleaned AS (
                 SELECT
                     booking_key,
                     source_dataset,
                     original_source_row_number,
-                    batch_id AS first_seen_batch_id,
-                    batch_sequence AS first_seen_batch_sequence,
+                    batch_id AS current_batch_id,
+                    batch_sequence AS current_batch_sequence,
                     batch_effective_at,
                     etl_year,
                     etl_month,
                     etl_day,
-                    watermark_date,
+                    etl_date,
                     raw_batch_sequence,
                     record_hash,
                     source_file_name,
@@ -350,13 +335,13 @@ def build_silver_tables() -> None:
                     booking_key,
                     source_dataset,
                     original_source_row_number,
-                    first_seen_batch_id,
-                    first_seen_batch_sequence,
+                    current_batch_id,
+                    current_batch_sequence,
                     batch_effective_at,
                     etl_year,
                     etl_month,
                     etl_day,
-                    watermark_date,
+                    etl_date,
                     raw_batch_sequence,
                     record_hash,
                     source_file_name,
@@ -441,12 +426,12 @@ def build_silver_tables() -> None:
                 booking_key AS booking_id,
                 source_dataset,
                 original_source_row_number,
-                first_seen_batch_id,
-                first_seen_batch_sequence,
+                current_batch_id,
+                current_batch_sequence,
                 etl_year,
                 etl_month,
                 etl_day,
-                watermark_date,
+                etl_date,
                 raw_batch_sequence,
                 record_hash,
                 hotel,

@@ -83,7 +83,7 @@ hotel_booking_demand/incremental_batches/
 | `batch_id` | ID business batch, ví dụ `batch_001_initial`. |
 | `batch_effective_at` | Thời điểm hiệu lực deterministic của batch. |
 
-Không dùng `watermark_date` trong raw object path để tránh trùng nghĩa với `etl_*`. `watermark_date` chỉ còn là metadata/partition field trong Iceberg.
+Raw object path không tạo thêm folder `etl_date=YYYYMMDD` vì đã có đủ `etl_year/etl_month/etl_day`. Trong Iceberg, `etl_date` là logical partition column ở dạng `yyyyMMdd`, giúp query/filter theo ngày ingest gọn hơn.
 
 ## 5. Synthetic incremental batches
 
@@ -102,8 +102,8 @@ Các batch demo:
 | `batch_001_initial.csv` | Initial state của dữ liệu. |
 | `batch_002_updates.csv` | Một số bản ghi thay đổi business columns, có duplicate có chủ ý. |
 | `batch_003_duplicate_replay.csv` | Replay duplicate để test idempotency. |
-| `batch_004_same_state.csv` | Cùng business state lặp lại, current state không bị inflate. |
-| `batch_005_reverted_state.csv` | Một bản ghi đổi trạng thái rồi quay lại trạng thái cũ, current state phải lấy batch mới nhất. |
+| `batch_004_same_state.csv` | Cùng business state lặp lại; batch mới nhất vẫn trở thành current nhưng không làm tăng số dòng. |
+| `batch_005_reverted_state.csv` | Một bản ghi đổi trạng thái rồi quay lại trạng thái cũ; batch mới nhất phải trở thành current. |
 
 Production thực tế nên thay synthetic key bằng booking/reservation ID từ source system.
 
@@ -153,10 +153,25 @@ Silver vẫn nằm ở Iceberg vì đây là tầng pre-transform/daily batch ph
 Logic chính:
 
 - `deduped_hotel_bookings`: bỏ duplicate/replay thật theo `booking_key + batch_id + record_hash`, giữ deterministic winner theo `row_ingestion_id`, `ingested_at`.
-- `current_hotel_bookings`: chọn latest changed business state theo `booking_key`, `batch_sequence`, `batch_effective_at`, `row_ingestion_id`.
+- `current_hotel_bookings`: chọn latest loaded record theo `booking_key`, `batch_sequence`, `batch_effective_at`, `batch_row_number`, `row_ingestion_id`.
 - `booking_metrics`: tính metric booking-level như `total_nights`, `total_guests`, `estimated_revenue`, `realized_revenue`, bucket lead time/stay length.
 
-Không có model/table riêng cho change history ở dbt. Change-detection là kỹ thuật xử lý dữ liệu nằm trong Silver build để chọn current state và bảo vệ idempotency.
+Không có model/table riêng cho change history ở dbt. Current-state trong MVP là latest-record-wins sau exact dedup; `record_hash` dùng cho dedup/validation, không dùng để quyết định bản ghi current.
+
+### Kiểm soát Parquet files trong Iceberg
+
+Bronze/Silver Iceberg tables lưu physical data bằng Parquet trong MinIO `warehouse` bucket, nhưng pipeline không đọc hoặc sắp xếp dữ liệu bằng tên file Parquet.
+
+Iceberg kiểm soát file bằng table metadata:
+
+- mỗi write tạo snapshot/metadata mới
+- manifest files ghi nhận data files thuộc snapshot nào
+- query engine đọc table qua Iceberg catalog, không scan folder theo thứ tự filename
+- partition column `etl_date` giúp pruning theo ngày ingest
+
+Vì vậy, thứ tự xử lý business không dựa vào thứ tự Parquet file. Thứ tự đúng được kiểm soát bằng data columns như `batch_sequence`, `batch_effective_at`, `batch_id`, `batch_row_number` và `row_ingestion_id`.
+
+Trong MVP này, Bronze append theo batch và skip `batch_id` đã ingest để tránh append trùng khi rerun. Silver dùng `CREATE OR REPLACE TABLE`, nên output deterministic theo trạng thái Bronze hiện tại. Nếu dữ liệu lớn lên, cần thêm compaction để xử lý small files, nhưng chưa cần cho local MVP.
 
 ## 8. StarRocks External Catalog
 
@@ -305,30 +320,20 @@ Validation được chia thành 3 nhóm:
 | Data contract validation | Tự động trong `dbt test` | Kiểm tra key, null, duplicate, metric và serving tables. |
 | Demo readiness validation | Chạy thủ công hoặc trước buổi demo | Tổng hợp các check dễ trình bày với mentor. |
 
-### 12.1 Pipeline validation trong Airflow
+### 12.1 Validation tự động trong Airflow
 
-Các check này chạy tự động khi trigger DAG `hotel_booking_pipeline`.
+Airflow không chỉ orchestrate task, mà còn có một số checkpoint để fail sớm khi pipeline sai. Không liệt kê lại toàn bộ DAG ở đây; các validation chính là:
 
-| Task | Tự động fail DAG? | Kiểm tra |
+| Layer | Validation tự động | Khi fail thì nghĩa là |
 | --- | --- | --- |
-| `check_csv_exists` | Có | File `data/input/hotel_bookings.csv` tồn tại và không rỗng. |
-| `profile_dataset` | Có nếu script lỗi | Chạy `scripts/profile_dataset.py`, ghi `docs/data_profile_summary.md`. File này chỉ profile original CSV, không profile batch/Iceberg. |
-| `generate_synthetic_batches` | Có | Tạo deterministic incremental batch files từ original CSV. |
-| `upload_batches_to_minio` | Có | Upload batch CSV vào MinIO raw bucket theo path `etl_year/etl_month/etl_day/raw_batch_sequence`. |
-| `wait_for_minio` | Có | MinIO reachable trong Docker network. |
-| `wait_for_iceberg_rest` | Có | Iceberg REST Catalog reachable. |
-| `run_spark_iceberg_ingestion` | Có | Spark đọc batch CSV từ MinIO và append vào Bronze Iceberg. Batch đã ingest sẽ được skip nếu không dùng `--force`. |
-| `wait_for_starrocks` | Có | StarRocks port `9030` reachable và `SELECT 1` chạy được. |
-| `create_iceberg_external_catalog` | Có | StarRocks có External Catalog trỏ tới Iceberg REST + MinIO. |
-| `validate_iceberg_history_row_counts` | Có | Row count của batch CSV local khớp Bronze Iceberg theo `batch_id`. |
-| `run_spark_iceberg_silver_models` | Có | Build Silver Iceberg tables: deduped, current, metrics. |
-| `validate_iceberg_silver_tables` | Có | Silver Iceberg tables visible qua StarRocks và có rows. |
-| `dbt_debug` | Có | dbt profile, connection và target schema hợp lệ. |
-| `dbt_run` | Có | Build dbt views/tables trong đúng dependency graph. |
-| `dbt_test` | Có | Chạy toàn bộ dbt tests. |
-| `apply_starrocks_materialized_views` | Có | Create/refresh/validate Materialized Views. |
-| `validate_materialized_view_rewrite` | Có | `EXPLAIN` query aggregate phải rewrite sang `mv_daily_booking_revenue`. |
-| `log_validation_counts` | Có | Serving tables non-empty, current-state checks và fixture checks đạt. |
+| Input | Original CSV tồn tại, profiler chạy được, batch files generate được. | Thiếu dataset hoặc batch generator lỗi. |
+| Raw/Bronze | Batch CSV local phải khớp row count với Bronze Iceberg theo `batch_id`. | Upload/ingest bị thiếu dòng, đọc sai path, hoặc Bronze bị stale. |
+| Silver | Silver Iceberg tables phải visible qua StarRocks External Catalog và có rows. | Spark Silver build lỗi hoặc StarRocks chưa đọc được Iceberg. |
+| dbt | `dbt debug`, `dbt run`, `dbt test` phải pass. | Connection/model dependency/data contract có vấn đề. |
+| Gold serving | Current/fact/mart tables phải có rows, current row count phải khớp distinct `booking_key`. | Dedup/current-state hoặc mart build có lỗi. |
+| Materialized View | MV create/refresh pass và `EXPLAIN` phải rewrite query phù hợp sang MV. | MV không active, query không match MV, hoặc StarRocks rewrite chưa hoạt động. |
+
+Các checkpoint này đủ để chứng minh flow chạy end-to-end, nhưng không thay thế việc review dashboard thủ công trong Superset.
 
 ### 12.2 Data contract validation trong dbt
 
@@ -336,10 +341,10 @@ Các validation này nằm trong `dbt/hotel_booking/models/schema.yml` và `dbt/
 
 | Nhóm test | Nội dung |
 | --- | --- |
-| Source contract | `booking_key`, `batch_id`, `batch_sequence`, `batch_effective_at`, `record_hash`, `etl_*`, `watermark_date`, `raw_batch_sequence` không null. |
+| Source contract | `booking_key`, `batch_id`, `batch_sequence`, `batch_effective_at`, `record_hash`, `etl_*`, `etl_date`, `raw_batch_sequence` không null. |
 | Dedup contract | Mỗi `booking_key + batch_id` chỉ có tối đa một `record_hash`. Nếu cùng một booking trong cùng batch có nhiều business state khác nhau thì test fail. |
 | Current-state contract | `int_current_hotel_bookings` có đúng một row cho mỗi `booking_key`. |
-| Fixture contract | `batch_004_same_state` không làm đổi current state sai; `batch_005_reverted_state` phải trở thành latest current state cho fixture tương ứng. |
+| Fixture contract | `batch_004_same_state` phải trở thành current record cho same-state fixture; `batch_005_reverted_state` phải trở thành current record cho reverted fixture. |
 | Metric contract | `total_nights`, `adr`, `estimated_revenue`, `realized_revenue` không âm. |
 | Fact contract | `fact_bookings.booking_key` not null + unique, `is_cancelled` chỉ nhận `0/1`, fact table không rỗng. |
 | Dimension contract | Dim tables không rỗng và các dimension key chính không null. |
@@ -394,6 +399,18 @@ HAVING COUNT(DISTINCT record_hash) > 1;
 SELECT
     (SELECT COUNT(*) FROM hotel_booking.int_current_hotel_bookings) AS current_rows,
     (SELECT COUNT(DISTINCT booking_key) FROM hotel_booking.stg_iceberg_raw_hotel_bookings) AS distinct_booking_keys;
+
+SELECT booking_key, current_batch_id
+FROM hotel_booking.int_current_hotel_bookings
+WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
+ORDER BY booking_key;
+```
+
+Expected fixture result:
+
+```text
+hotel_booking_demand:1    batch_004_same_state
+hotel_booking_demand:2    batch_005_reverted_state
 ```
 
 ### 12.4 Materialized View validation

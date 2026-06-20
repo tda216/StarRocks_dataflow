@@ -16,7 +16,7 @@ class BatchStorageMetadata:
     etl_year: int
     etl_month: int
     etl_day: int
-    watermark_date: str
+    etl_date: str
     raw_batch_sequence: str
 
 
@@ -54,7 +54,7 @@ def read_batch_storage_metadata(batch_file: Path) -> BatchStorageMetadata:
         etl_year=effective_at.year,
         etl_month=effective_at.month,
         etl_day=effective_at.day,
-        watermark_date=effective_at.strftime("%Y%m%d"),
+        etl_date=effective_at.strftime("%Y%m%d"),
         raw_batch_sequence=f"{batch_sequence:03d}",
     )
 

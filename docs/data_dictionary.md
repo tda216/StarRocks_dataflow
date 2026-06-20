@@ -103,7 +103,7 @@ Metadata columns:
 | `etl_year` | Raw landing partition year from `batch_effective_at`. |
 | `etl_month` | Raw landing partition month from `batch_effective_at`. |
 | `etl_day` | Raw landing partition day from `batch_effective_at`. |
-| `watermark_date` | Deterministic watermark date in `yyyyMMdd` format. Stored as metadata and Iceberg partition, not as a raw MinIO folder. |
+| `etl_date` | Deterministic ingestion date in `yyyyMMdd` format. Stored as metadata and Iceberg partition, not as a raw MinIO folder. |
 | `raw_batch_sequence` | Zero-padded sequence used in the raw object path. |
 
 ## Iceberg Raw History
@@ -114,7 +114,7 @@ Bronze Iceberg table:
 iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history
 ```
 
-Spark appends generated batch CSVs to this Iceberg table. Iceberg manages the table and stores data in Parquet under the MinIO `warehouse` bucket. The Bronze table is partitioned by `watermark_date` for daily batch pruning.
+Spark appends generated batch CSVs to this Iceberg table. Iceberg manages the table and stores data in Parquet under the MinIO `warehouse` bucket. The Bronze table is partitioned by `etl_date` for daily batch pruning.
 
 Additional ingestion metadata:
 
@@ -123,7 +123,7 @@ Additional ingestion metadata:
 | `source_file_name` | Generated batch CSV filename. |
 | `source_object_path` | Raw MinIO object path for the batch file. |
 | `etl_year`, `etl_month`, `etl_day` | Ingestion date partitions. |
-| `watermark_date` | Ingestion watermark date in `yyyyMMdd` format. |
+| `etl_date` | Ingestion date in `yyyyMMdd` format. |
 | `raw_batch_sequence` | Zero-padded batch sequence from raw object path. |
 | `file_hash` | SHA-256 hash of the local batch file content. |
 | `record_hash` | SHA-256 hash of normalized business columns only. |
@@ -146,8 +146,8 @@ Spark builds these physical Silver tables from Bronze raw history:
 
 | Table | Grain | Purpose |
 | --- | --- | --- |
-| `deduped_hotel_bookings` | one row per `booking_key + batch_id + record_hash` | Removes exact duplicate/replay rows while keeping valid A -> B -> A change detection. |
-| `current_hotel_bookings` | one current row per `booking_key` | Stores cleaned and typed latest business state. Change detection is handled inside this Spark build step. |
+| `deduped_hotel_bookings` | one row per `booking_key + batch_id + record_hash` | Removes exact duplicate/replay rows while preserving later batches for current-state selection. |
+| `current_hotel_bookings` | one current row per `booking_key` | Stores cleaned and typed latest loaded record after exact dedup. |
 | `booking_metrics` | one current booking row with derived metrics | Adds revenue, guest, stay length, lead time, and analysis bucket metrics. |
 
 dbt exposes these Silver tables through StarRocks views:
@@ -158,15 +158,15 @@ hotel_booking.int_current_hotel_bookings
 hotel_booking.int_booking_metrics
 ```
 
-There is no separate business layer/table/model for change tracking/history in this MVP. Change detection is embedded in the Spark Silver `current_hotel_bookings` build.
+There is no separate business layer/table/model for change tracking/history in this MVP. Current-state selection is latest-record-wins after exact dedup.
 
 ## Current-State Metadata
 
 | Column | Meaning |
 | --- | --- |
 | `record_hash` | Business-only hash used consistently across raw history, dedup, current, and fact models. |
-| `first_seen_batch_id` | Batch that produced the current business state. |
-| `first_seen_batch_sequence` | Sequence of the batch that produced the current business state. |
+| `current_batch_id` | Latest batch that produced the current record. |
+| `current_batch_sequence` | Sequence of the latest batch that produced the current record. |
 
 ## Cleaned Fields
 

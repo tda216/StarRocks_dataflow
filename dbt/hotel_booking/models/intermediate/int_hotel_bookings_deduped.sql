@@ -13,7 +13,7 @@ SELECT
     etl_year,
     etl_month,
     etl_day,
-    watermark_date,
+    etl_date,
     raw_batch_sequence,
     source_file_name,
     source_object_path,

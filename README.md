@@ -39,7 +39,7 @@ flowchart LR
 | Source | CSV | `data/input/hotel_bookings.csv` | Original Kaggle dataset. |
 | Synthetic batch layer | Python-generated CSV | `data/input/incremental_batches/batch_*.csv` | Generate deterministic incremental batches with persisted `booking_key`, updates, duplicate replay and edge-case fixtures. |
 | Raw landing | MinIO / CSV | `hotel-booking-raw/.../etl_year=.../etl_month=.../etl_day=.../raw_batch_sequence=.../batch_*.csv` | Immutable raw batch files for replay, audit and debug. |
-| Bronze lakehouse | Iceberg / Parquet on MinIO | `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` | Append-only raw historical records, partitioned by `watermark_date`. |
+| Bronze lakehouse | Iceberg / Parquet on MinIO | `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` | Append-only raw historical records, partitioned by `etl_date`. |
 | Silver lakehouse | Iceberg / Parquet on MinIO | `iceberg_catalog.hotel_booking_silver.*` | Physical dedup, current state and metrics tables built by Spark. |
 | External catalog | StarRocks External Catalog | `iceberg_catalog` | StarRocks reads Iceberg tables without owning their storage or table type. |
 | dbt staging/intermediate | dbt + StarRocks views | `stg_*`, `int_*` | Expose Bronze/Silver Iceberg objects as StarRocks views and run validation tests. |
@@ -102,8 +102,8 @@ Current generated batch files:
 | `batch_001_initial.csv` | Initial business state | 119,390 |
 | `batch_002_updates.csv` | Selected changed records, exact duplicates and new records | 17 |
 | `batch_003_duplicate_replay.csv` | Replay duplicates to test idempotency | 15 |
-| `batch_004_same_state.csv` | `A -> A -> A` fixture, duplicate/same-state replay should not inflate current/fact/mart counts | 1 |
-| `batch_005_reverted_state.csv` | `A -> B -> A` fixture, reverted business state should still be detected deterministically | 1 |
+| `batch_004_same_state.csv` | `A -> A -> A` fixture; latest same-state batch should become current without inflating counts | 1 |
+| `batch_005_reverted_state.csv` | `A -> B -> A` fixture; latest reverted batch should become current deterministically | 1 |
 
 ## 4. Iceberg Storage
 
@@ -114,13 +114,15 @@ Iceberg stores table metadata and physical Parquet files in the MinIO `warehouse
 - MinIO raw bucket chỉ lưu immutable CSV batch files.
 - Iceberg quản lý table metadata, snapshots, manifests và physical Parquet files.
 - Không nên debug Iceberg bằng cách đọc trực tiếp folder Parquet.
-- Nên inspect lineage qua SQL columns như `source_object_path`, `file_hash`, `watermark_date`, `batch_id`, `batch_sequence`.
+- Nên inspect lineage qua SQL columns như `source_object_path`, `file_hash`, `etl_date`, `batch_id`, `batch_sequence`.
+- Raw MinIO path dùng `etl_year/etl_month/etl_day`; Iceberg dùng logical partition `etl_date`. Hai phần này cùng đại diện cho ingestion date nhưng phục vụ hai tầng storage khác nhau.
+- Khi Silver có nhiều Parquet files, không cần tự kiểm soát thứ tự file. Iceberg quản lý snapshot/manifest; thứ tự business được kiểm soát bằng `batch_sequence`, `batch_effective_at`, `batch_row_number` và `row_ingestion_id`.
 
 ### 4.1 Bronze Iceberg
 
 | Table | Purpose | Partition |
 | --- | --- | --- |
-| `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` | Append-only raw historical records with ingestion metadata and business-only `record_hash` | `watermark_date` |
+| `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` | Append-only raw historical records with ingestion metadata and business-only `record_hash` | `etl_date` |
 
 Bronze table giữ toàn bộ raw history theo batch. Đây là nơi phục vụ replay, audit và kiểm tra incremental load.
 
@@ -129,7 +131,7 @@ Bronze table giữ toàn bộ raw history theo batch. Đây là nơi phục vụ
 | Table | Purpose |
 | --- | --- |
 | `deduped_hotel_bookings` | Exact duplicate collapse by `booking_key + batch_id + record_hash` |
-| `current_hotel_bookings` | Latest business state per `booking_key`; change detection is handled inside this build step |
+| `current_hotel_bookings` | Latest loaded record per `booking_key` after exact dedup |
 | `booking_metrics` | Typed, cleaned metrics table with derived fields for Gold dbt models |
 
 Silver tables là physical Iceberg tables được build bởi Spark. Việc để Silver ở Iceberg giúp phát huy ưu điểm của lakehouse: lưu intermediate/checkpoint data ngoài StarRocks internal storage, giảm áp lực SSD/storage cho StarRocks, đồng thời giữ khả năng audit/replay.
@@ -172,7 +174,7 @@ Silver exact dedup loại duplicate/replay records theo key:
 booking_key + batch_id + record_hash
 ```
 
-Logic này chỉ remove duplicate trong cùng batch, không global dedup theo `booking_key + record_hash`, vì case `A -> B -> A` vẫn phải được giữ lại để detect reverted business state đúng.
+Logic này chỉ remove duplicate trong cùng batch, không global dedup theo `booking_key + record_hash`. Nhờ vậy các batch sau vẫn được giữ lại để chọn bản ghi latest/current.
 
 ### 5.4 Current-State Derivation
 
@@ -180,23 +182,22 @@ POC này không triển khai một business layer hoặc model riêng cho change
 
 Trong POC này:
 
-- Spark Silver build xác định latest business state bằng `booking_key`, `batch_sequence`, `batch_effective_at`, và `record_hash`
+- Spark Silver build xác định current record bằng `booking_key`, `batch_sequence`, `batch_effective_at`, `batch_row_number` và `row_ingestion_id`
 - không materialize table/model change-history riêng
 - dashboard và marts chỉ đi từ current/metrics/fact/mart
 
 Current-state logic:
 
 - order records by `booking_key`, `batch_sequence`, `batch_effective_at`
-- detect change bằng `LAG(record_hash)`
-- consecutive same `record_hash` values được bỏ qua trước khi chọn current row
-- latest changed business state được chọn bằng `ROW_NUMBER() ... ORDER BY batch_sequence DESC, batch_effective_at DESC`
+- không so sánh với previous `record_hash` để quyết định current
+- latest loaded record được chọn bằng `ROW_NUMBER() ... ORDER BY batch_sequence DESC, batch_effective_at DESC, batch_row_number DESC, row_ingestion_id DESC`
 
 Expected behavior:
 
 | Case | Expected behavior |
 | --- | --- |
-| `A -> A -> A` | Same-state replay không làm tăng current/fact/mart counts |
-| `A -> B -> A` | Reverted business state vẫn được detect deterministically |
+| `A -> A -> A` | Batch mới nhất vẫn là current, nhưng không làm tăng current/fact/mart counts |
+| `A -> B -> A` | Batch reverted mới nhất trở thành current deterministically |
 | Duplicate replay | Không làm tăng current/fact/mart counts |
 | Same `booking_key + batch_id` nhưng nhiều `record_hash` | Validation fails |
 
@@ -301,7 +302,7 @@ Superset không nằm trong Airflow DAG vì Superset là BI serving/consumer lay
 | Silver tables | Airflow checks Silver Iceberg tables are visible from StarRocks and non-empty |
 | Multiple states per batch | dbt custom tests fail if one `booking_key + batch_id` has multiple distinct `record_hash` |
 | Current-state row count | dbt custom test checks current row count equals distinct `booking_key` count |
-| Fixture behavior | dbt tests validate `A -> A -> A` keeps initial current state and `A -> B -> A` ends with reverted current state |
+| Fixture behavior | dbt tests validate `A -> A -> A` chọn batch same-state mới nhất và `A -> B -> A` ends with reverted current state |
 | dbt result | `dbt run` and `dbt test` must pass after Silver tables are rebuilt |
 | MV validation | Checks MV exists, active, `query_rewrite_status = VALID`, totals match marts, and `EXPLAIN` uses `mv_daily_booking_revenue` |
 

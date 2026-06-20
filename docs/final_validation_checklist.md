@@ -156,14 +156,14 @@ Check Bronze raw partition metadata:
 
 ```bash
 docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT batch_id, etl_year, etl_month, etl_day, watermark_date, raw_batch_sequence, COUNT(*) AS row_count
+SELECT batch_id, etl_year, etl_month, etl_day, etl_date, raw_batch_sequence, COUNT(*) AS row_count
 FROM hotel_booking.stg_iceberg_raw_hotel_bookings
-GROUP BY batch_id, etl_year, etl_month, etl_day, watermark_date, raw_batch_sequence
+GROUP BY batch_id, etl_year, etl_month, etl_day, etl_date, raw_batch_sequence
 ORDER BY raw_batch_sequence;
 "
 ```
 
-Expected: one row per generated batch, with `watermark_date` from `20260101` to `20260105`.
+Expected: one row per generated batch, with `etl_date` from `20260101` to `20260105`.
 
 Check Silver Iceberg row counts:
 
@@ -285,7 +285,7 @@ Check current-state fixture batches:
 
 ```bash
 docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT booking_key, first_seen_batch_id
+SELECT booking_key, current_batch_id
 FROM hotel_booking.int_current_hotel_bookings
 WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
 ORDER BY booking_key;
@@ -295,7 +295,7 @@ ORDER BY booking_key;
 Expected:
 
 ```text
-hotel_booking_demand:1    batch_001_initial
+hotel_booking_demand:1    batch_004_same_state
 hotel_booking_demand:2    batch_005_reverted_state
 ```
 

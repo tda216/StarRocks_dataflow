@@ -390,17 +390,17 @@ def check_current_state_validations(report: DemoReport, cursor: pymysql.cursors.
 
     cursor.execute(
         f"""
-        SELECT booking_key, first_seen_batch_id
+        SELECT booking_key, current_batch_id
         FROM `{database}`.`int_current_hotel_bookings`
         WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
         ORDER BY booking_key
         """
     )
     rows = cursor.fetchall()
-    print_rows(["booking_key", "first_seen_batch_id"], rows)
+    print_rows(["booking_key", "current_batch_id"], rows)
     fixture_batches = {row[0]: row[1] for row in rows}
     expected_fixture_batches = {
-        "hotel_booking_demand:1": "batch_001_initial",
+        "hotel_booking_demand:1": "batch_004_same_state",
         "hotel_booking_demand:2": "batch_005_reverted_state",
     }
     for booking_key, expected_batch in expected_fixture_batches.items():

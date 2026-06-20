@@ -75,7 +75,7 @@ def upload_batches(batch_dir: Path = DEFAULT_BATCH_DIR) -> list[str]:
         uploaded.append(object_uri)
         print(
             f"Uploaded {batch_file} -> {object_uri} "
-            f"(etl_date={metadata.watermark_date}, raw_batch_sequence={metadata.raw_batch_sequence})"
+            f"(etl_date={metadata.etl_date}, raw_batch_sequence={metadata.raw_batch_sequence})"
         )
 
     return uploaded

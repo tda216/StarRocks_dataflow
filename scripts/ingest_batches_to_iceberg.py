@@ -81,7 +81,7 @@ OUTPUT_COLUMNS = [
     "etl_year",
     "etl_month",
     "etl_day",
-    "watermark_date",
+    "etl_date",
     "raw_batch_sequence",
     "source_file_name",
     "source_object_path",
@@ -97,11 +97,11 @@ BRONZE_PARTITION_COLUMNS = {
     "etl_year": "INT",
     "etl_month": "INT",
     "etl_day": "INT",
-    "watermark_date": "STRING",
+    "etl_date": "STRING",
     "raw_batch_sequence": "STRING",
 }
 
-BRONZE_PARTITION_FIELD = "watermark_date"
+BRONZE_PARTITION_FIELD = "etl_date"
 
 
 def env(name: str, default: str) -> str:
@@ -194,7 +194,7 @@ def create_table_if_needed(spark: SparkSession, table_name: str) -> None:
         etl_year INT,
         etl_month INT,
         etl_day INT,
-        watermark_date STRING,
+        etl_date STRING,
         raw_batch_sequence STRING,
         source_file_name STRING,
         source_object_path STRING,
@@ -206,7 +206,7 @@ def create_table_if_needed(spark: SparkSession, table_name: str) -> None:
         {source_column_ddl}
     )
     USING iceberg
-    PARTITIONED BY (watermark_date)
+    PARTITIONED BY (etl_date)
     """
 
     try:
@@ -222,7 +222,7 @@ def create_table_if_needed(spark: SparkSession, table_name: str) -> None:
         else:
             raise
     ensure_table_columns(spark, table_name)
-    ensure_watermark_partition_spec(spark, table_name)
+    ensure_etl_partition_spec(spark, table_name)
 
 
 def ensure_table_columns(spark: SparkSession, table_name: str) -> None:
@@ -295,7 +295,7 @@ def unregister_iceberg_table_via_rest(table_name: str) -> None:
     )
 
 
-def ensure_watermark_partition_spec(spark: SparkSession, table_name: str) -> None:
+def ensure_etl_partition_spec(spark: SparkSession, table_name: str) -> None:
     try:
         spark.sql(f"ALTER TABLE {table_name} ADD PARTITION FIELD {BRONZE_PARTITION_FIELD}")
         print(f"Added Bronze Iceberg partition field: {table_name}.{BRONZE_PARTITION_FIELD}")
@@ -305,16 +305,20 @@ def ensure_watermark_partition_spec(spark: SparkSession, table_name: str) -> Non
         else:
             raise
 
-    # Existing local MVP tables may have been created with batch_id partitioning.
-    # Drop it from the current partition spec so future writes use watermark_date.
-    try:
-        spark.sql(f"ALTER TABLE {table_name} DROP PARTITION FIELD batch_id")
-        print(f"Dropped legacy Bronze Iceberg partition field: {table_name}.batch_id")
-    except Exception as exc:
-        if _is_missing_partition_error(exc):
-            print("Legacy Bronze Iceberg partition field already absent: batch_id")
-        else:
-            print(f"Could not drop legacy partition field batch_id; existing data remains queryable: {exc}")
+    # Existing local MVP tables may have been created with older partition specs.
+    # Drop legacy fields from the current spec so future writes use etl_date.
+    for legacy_partition_field in ("batch_id", "watermark_date"):
+        try:
+            spark.sql(f"ALTER TABLE {table_name} DROP PARTITION FIELD {legacy_partition_field}")
+            print(f"Dropped legacy Bronze Iceberg partition field: {table_name}.{legacy_partition_field}")
+        except Exception as exc:
+            if _is_missing_partition_error(exc):
+                print(f"Legacy Bronze Iceberg partition field already absent: {legacy_partition_field}")
+            else:
+                print(
+                    f"Could not drop legacy partition field {legacy_partition_field}; "
+                    f"existing data remains queryable: {exc}"
+                )
 
 
 def batch_already_ingested(spark: SparkSession, table_name: str, batch_id: str) -> bool:
@@ -351,7 +355,7 @@ def read_and_enrich_batch(
         .withColumn("etl_year", F.lit(storage_metadata.etl_year).cast("int"))
         .withColumn("etl_month", F.lit(storage_metadata.etl_month).cast("int"))
         .withColumn("etl_day", F.lit(storage_metadata.etl_day).cast("int"))
-        .withColumn("watermark_date", F.lit(storage_metadata.watermark_date))
+        .withColumn("etl_date", F.lit(storage_metadata.etl_date))
         .withColumn("raw_batch_sequence", F.lit(storage_metadata.raw_batch_sequence))
         .withColumn("source_file_name", F.lit(local_batch_file.name))
         .withColumn("source_object_path", F.lit(source_object_path))
