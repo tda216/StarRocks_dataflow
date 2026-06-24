@@ -1,4 +1,4 @@
-# StarRocks Dataflow - Trịnh Đức An (S.AI.20K)
+# StarRocks Dataflow
 
 ## Mục tiêu POC
 
