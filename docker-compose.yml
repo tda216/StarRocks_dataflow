@@ -27,7 +27,6 @@ x-airflow-common: &airflow-common
     MINIO_BATCH_PREFIX: "${MINIO_BATCH_PREFIX:-hotel_booking_demand/incremental_batches}"
     MINIO_ROOT_USER: "${MINIO_ROOT_USER:-minioadmin}"
     MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-minioadmin}"
-    MINIO_RAW_OBJECT_KEY: "${MINIO_RAW_OBJECT_KEY:-hotel_booking_demand/hotel_bookings.csv}"
     ICEBERG_REST_URI: "${ICEBERG_REST_URI:-http://iceberg-rest:8181}"
     ICEBERG_CATALOG_NAME: "${ICEBERG_CATALOG_NAME:-iceberg_catalog}"
     ICEBERG_DATABASE: "${ICEBERG_DATABASE:-hotel_booking_lakehouse}"
