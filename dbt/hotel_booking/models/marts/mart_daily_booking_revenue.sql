@@ -1,11 +1,5 @@
 {{ config(
-    materialized='table',
-    engine='OLAP',
-    table_type='DUPLICATE',
-    keys=['arrival_date'],
-    distributed_by=['arrival_date'],
-    buckets=8,
-    properties={'replication_num': '1'}
+    materialized='view'
 ) }}
 
 SELECT

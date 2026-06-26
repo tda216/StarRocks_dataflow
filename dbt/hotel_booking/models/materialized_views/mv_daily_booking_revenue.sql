@@ -1,11 +1,11 @@
 {{ config(
-    materialized='view'
+    materialized='starrocks_materialized_view',
+    distributed_by='arrival_date',
+    buckets=8
 ) }}
 
 SELECT
-    YEAR(arrival_date) AS year_number,
-    MONTH(arrival_date) AS month_number,
-    DATE_TRUNC('month', arrival_date) AS month_start_date,
+    arrival_date,
     COUNT(*) AS total_bookings,
     SUM(is_cancelled) AS cancelled_bookings,
     COUNT(*) - SUM(is_cancelled) AS successful_bookings,
@@ -16,7 +16,4 @@ SELECT
     AVG(adr) AS average_adr
 FROM {{ ref('fact_bookings') }}
 WHERE arrival_date IS NOT NULL
-GROUP BY
-    YEAR(arrival_date),
-    MONTH(arrival_date),
-    DATE_TRUNC('month', arrival_date)
+GROUP BY arrival_date

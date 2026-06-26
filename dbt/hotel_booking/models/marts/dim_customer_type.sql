@@ -1,11 +1,5 @@
 {{ config(
-    materialized='table',
-    engine='OLAP',
-    table_type='DUPLICATE',
-    keys=['customer_type'],
-    distributed_by=['customer_type'],
-    buckets=4,
-    properties={'replication_num': '1'}
+    materialized='view'
 ) }}
 
 SELECT DISTINCT

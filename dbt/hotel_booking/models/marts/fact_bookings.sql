@@ -1,11 +1,5 @@
 {{ config(
-    materialized='table',
-    engine='OLAP',
-    table_type='PRIMARY',
-    keys=['booking_key'],
-    distributed_by=['booking_key'],
-    buckets=16,
-    properties={'replication_num': '1'}
+    materialized='view'
 ) }}
 
 SELECT

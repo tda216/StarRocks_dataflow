@@ -1,18 +1,11 @@
 # Final Validation Checklist
 
-Use checklist này trước khi demo final local BI POC.
+Checklist này dùng trước khi demo mentor.
 
-## 1. Docker Services
-
-Start services:
+## 1. Services
 
 ```bash
-docker compose up -d
-```
-
-Check status:
-
-```bash
+docker compose config
 docker compose ps
 ```
 
@@ -28,27 +21,38 @@ Expected services:
 
 ## 2. Dataset
 
-CSV exists:
+```bash
+ls -lh data/input/hotel_bookings.csv
+ls -lh data/input/incremental_batches/
+```
+
+Expected:
+
+- original CSV exists at `data/input/hotel_bookings.csv`
+- generated files include `batch_001_initial.csv` to `batch_005_reverted_state.csv`
+
+## 3. Airflow DAG
 
 ```bash
-test -f data/input/hotel_bookings.csv && echo "CSV exists"
+docker compose exec airflow-webserver airflow dags unpause hotel_booking_pipeline
+docker compose exec airflow-webserver airflow dags trigger hotel_booking_pipeline
 ```
 
-Expected path:
+Expected task groups:
 
 ```text
-data/input/hotel_bookings.csv
+ingestion -> transformation -> validation
 ```
 
-Expected row count for current dataset:
+Expected success meaning:
 
-```text
-119390
-```
+- raw batch CSVs uploaded to MinIO
+- Spark appended Bronze Iceberg raw history
+- StarRocks External Catalog exists
+- `dbt debug`, `dbt run`, and `dbt test` pass
+- dbt-created mart views and Materialized Views have rows
 
-`docs/data_profile_summary.md` profiles only the original CSV at `data/input/hotel_bookings.csv`. It does not profile generated incremental batches or Iceberg history.
-
-## 3. MinIO Raw Storage
+## 4. MinIO Raw Objects
 
 Open MinIO:
 
@@ -56,82 +60,41 @@ Open MinIO:
 http://localhost:9001
 ```
 
-Expected bucket/object:
+Check bucket:
 
 ```text
-hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=01/raw_batch_sequence=001/batch_001_initial.csv
-hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=02/raw_batch_sequence=002/batch_002_updates.csv
-hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=03/raw_batch_sequence=003/batch_003_duplicate_replay.csv
-hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=04/raw_batch_sequence=004/batch_004_same_state.csv
-hotel-booking-raw/hotel_booking_demand/incremental_batches/etl_year=2026/etl_month=01/etl_day=05/raw_batch_sequence=005/batch_005_reverted_state.csv
-warehouse/
+hotel-booking-raw
 ```
 
-## 4. Airflow DAG
-
-Open Airflow:
+Expected raw layout:
 
 ```text
-http://localhost:8080
+hotel_booking_demand/incremental_batches/
+  etl_year=2026/
+    etl_month=01/
+      etl_day=01/
+        raw_batch_sequence=001/
+          batch_001_initial.csv
 ```
 
-Trigger DAG manually:
-
-```bash
-docker compose exec airflow-webserver airflow dags unpause hotel_booking_pipeline
-docker compose exec airflow-webserver airflow dags trigger hotel_booking_pipeline
-```
-
-Expected DAG:
-
-```text
-hotel_booking_pipeline
-```
-
-Expected task groups:
-
-```text
-precheck -> ingestion -> transformation -> optimization -> validation
-```
-
-Expected final task:
-
-```text
-validation.log_validation_counts
-```
-
-The DAG should finish successfully.
-
-## 5. StarRocks Catalogs and Iceberg Bronze/Silver Tables
-
-Check database:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW DATABASES;"
-```
-
-Check tables:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW TABLES FROM hotel_booking;"
-```
-
-Check external catalog:
+## 5. StarRocks And Iceberg
 
 ```bash
 docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW CATALOGS;"
 docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW DATABASES FROM iceberg_catalog;"
 docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW TABLES FROM iceberg_catalog.hotel_booking_lakehouse;"
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW TABLES FROM iceberg_catalog.hotel_booking_silver;"
+docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW TABLES FROM hotel_booking;"
+docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW MATERIALIZED VIEWS FROM hotel_booking;"
 ```
 
-Expected catalog:
+Expected:
 
-```text
-iceberg_catalog
-```
+- `iceberg_catalog` exists
+- `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` exists
+- dbt views exist in `hotel_booking`
+- MVs exist: `mv_daily_booking_revenue`, `mv_monthly_booking_revenue`, `mv_hotel_performance`
 
-Check Iceberg raw history by batch:
+Bronze row count by batch:
 
 ```bash
 docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
@@ -142,164 +105,52 @@ ORDER BY batch_id;
 "
 ```
 
-Expected batch row counts:
+Expected batches:
 
-```text
-batch_001_initial             119390
-batch_002_updates             17
-batch_003_duplicate_replay    15
-batch_004_same_state          1
-batch_005_reverted_state      1
-```
+- `batch_001_initial`
+- `batch_002_updates`
+- `batch_003_duplicate_replay`
+- `batch_004_same_state`
+- `batch_005_reverted_state`
 
-Check Bronze raw partition metadata:
+## 6. dbt Validation
 
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT batch_id, etl_year, etl_month, etl_day, etl_date, raw_batch_sequence, COUNT(*) AS row_count
-FROM hotel_booking.stg_iceberg_raw_hotel_bookings
-GROUP BY batch_id, etl_year, etl_month, etl_day, etl_date, raw_batch_sequence
-ORDER BY raw_batch_sequence;
-"
-```
-
-Expected: one row per generated batch, with `etl_date` from `20260101` to `20260105`.
-
-Check Silver Iceberg row counts:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT 'deduped_hotel_bookings' AS table_name, COUNT(*) AS row_count
-FROM iceberg_catalog.hotel_booking_silver.deduped_hotel_bookings
-UNION ALL
-SELECT 'current_hotel_bookings', COUNT(*)
-FROM iceberg_catalog.hotel_booking_silver.current_hotel_bookings
-UNION ALL
-SELECT 'booking_metrics', COUNT(*)
-FROM iceberg_catalog.hotel_booking_silver.booking_metrics;
-"
-```
-
-Expected default row counts:
-
-```text
-deduped_hotel_bookings       119422
-current_hotel_bookings       119395
-booking_metrics              119395
-```
-
-## 6. dbt Run and Test
-
-Run manually if needed:
+Manual dbt run if needed:
 
 ```bash
 docker compose exec airflow-webserver dbt run \
   --project-dir /opt/airflow/dbt/hotel_booking \
-  --profiles-dir /opt/airflow/dbt/hotel_booking
-```
+  --profiles-dir /opt/airflow/dbt/hotel_booking \
+  --no-partial-parse \
+  --threads 1
 
-```bash
 docker compose exec airflow-webserver dbt test \
   --project-dir /opt/airflow/dbt/hotel_booking \
-  --profiles-dir /opt/airflow/dbt/hotel_booking
+  --profiles-dir /opt/airflow/dbt/hotel_booking \
+  --no-partial-parse \
+  --threads 1
 ```
 
-Expected:
+Hard-fail tests include:
 
-- `dbt run` succeeds.
-- `dbt test` succeeds.
+- one business state per `booking_key + batch_id`
+- one current row per `booking_key`
+- current row count matches distinct `booking_key`
+- non-negative metrics
+- mart/MV objects are not empty
+- MV totals match equivalent mart views
 
-## 7. Fact, Dimension, and Mart Tables
+Profile-style warning tests include:
 
-Check key tables:
+- ADR outliers / negative source ADR
+- zero-night bookings
+- zero-guest bookings
+- missing or unknown core dimensions
+- invalid arrival-date components
 
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SHOW TABLES FROM hotel_booking;
-"
-```
+Warnings are acceptable for demo if explained as data quality observations.
 
-Expected table groups:
-
-- `stg_iceberg_raw_hotel_bookings`
-- `int_current_hotel_bookings`
-- `int_booking_metrics`
-- `dim_*`
-- `fact_bookings`
-- `mart_*`
-
-Check mart row counts:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT 'fact_bookings' AS table_name, COUNT(*) AS row_count FROM hotel_booking.fact_bookings
-UNION ALL
-SELECT 'mart_daily_booking_revenue', COUNT(*) FROM hotel_booking.mart_daily_booking_revenue
-UNION ALL
-SELECT 'mart_monthly_booking_revenue', COUNT(*) FROM hotel_booking.mart_monthly_booking_revenue
-UNION ALL
-SELECT 'mart_hotel_performance', COUNT(*) FROM hotel_booking.mart_hotel_performance
-UNION ALL
-SELECT 'mart_room_performance', COUNT(*) FROM hotel_booking.mart_room_performance
-UNION ALL
-SELECT 'mart_market_segment_performance', COUNT(*) FROM hotel_booking.mart_market_segment_performance
-UNION ALL
-SELECT 'mart_channel_performance', COUNT(*) FROM hotel_booking.mart_channel_performance
-UNION ALL
-SELECT 'mart_country_performance', COUNT(*) FROM hotel_booking.mart_country_performance
-UNION ALL
-SELECT 'mart_cancellation_analysis', COUNT(*) FROM hotel_booking.mart_cancellation_analysis
-UNION ALL
-SELECT 'mart_lead_time_analysis', COUNT(*) FROM hotel_booking.mart_lead_time_analysis
-UNION ALL
-SELECT 'mart_customer_type_performance', COUNT(*) FROM hotel_booking.mart_customer_type_performance;
-"
-```
-
-Expected:
-
-- `fact_bookings = 119395` with the default generated batches: original `119390` rows plus `5` synthetic new rows.
-- `fact_bookings` should not inflate after duplicate replay.
-- mart tables have row count greater than `0`
-
-Check current-state edge-case fixtures:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT booking_key, COUNT(*) AS change_state_count
-FROM hotel_booking.int_current_hotel_bookings
-WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
-GROUP BY booking_key
-ORDER BY booking_key;
-"
-```
-
-Expected:
-
-```text
-hotel_booking_demand:1    1
-hotel_booking_demand:2    1
-```
-
-Check current-state fixture batches:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
-SELECT booking_key, current_batch_id
-FROM hotel_booking.int_current_hotel_bookings
-WHERE booking_key IN ('hotel_booking_demand:1', 'hotel_booking_demand:2')
-ORDER BY booking_key;
-"
-```
-
-Expected:
-
-```text
-hotel_booking_demand:1    batch_004_same_state
-hotel_booking_demand:2    batch_005_reverted_state
-```
-
-Check current row count matches distinct booking keys:
+## 7. Current-State Checks
 
 ```bash
 docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
@@ -309,9 +160,7 @@ SELECT
 "
 ```
 
-Expected: both values match.
-
-Check no multiple business states in the same batch for one `booking_key`:
+Expected: two counts match.
 
 ```bash
 docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
@@ -324,51 +173,43 @@ HAVING COUNT(DISTINCT record_hash) > 1;
 
 Expected: no rows.
 
-## 8. StarRocks Materialized Views
+## 8. Materialized Views
 
-Materialized Views run in the main Airflow DAG after `dbt_test`. Run the script manually only when testing this layer directly:
+MVs are created/refreshed by dbt during `dbt run`; there is no separate MV apply script in the main flow.
 
 ```bash
-docker compose exec airflow-webserver python /opt/airflow/scripts/apply_starrocks_materialized_views.py
+docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "
+SHOW MATERIALIZED VIEWS FROM hotel_booking;
+"
 ```
 
-Expected MVs:
-
-- `mv_daily_booking_revenue`
-- `mv_monthly_booking_revenue`
-- `mv_hotel_performance`
-
-Check MV status:
+Demo query rewrite:
 
 ```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SHOW MATERIALIZED VIEWS FROM hotel_booking;"
+docker compose exec airflow-webserver python /opt/airflow/scripts/demo_readiness.py
 ```
 
 Expected:
 
-- `is_active = true`
-- `query_rewrite_status = VALID`
-- validation script prints `diff_value = 0` for daily, monthly, and hotel checks
-
-The DAG also validates query rewrite with `EXPLAIN`. A matching daily aggregate query written against `fact_bookings` should scan `mv_daily_booking_revenue`.
-
-Superset uses dbt mart tables by default. MVs are the StarRocks optimization layer; dbt marts remain the business source of truth.
+- MVs exist and are active
+- MV aggregate totals match mart views
+- query rewrite demo can show `mv_daily_booking_revenue` in the `EXPLAIN` plan when StarRocks rewrite applies
 
 ## 9. Superset
 
-Open Superset:
+Open:
 
 ```text
 http://localhost:8088
 ```
 
-Expected connection URI:
+Connection URI:
 
 ```text
 starrocks://root:@starrocks:9030/default_catalog.hotel_booking
 ```
 
-Expected datasets:
+Dashboard charts should use only mart objects:
 
 - `mart_daily_booking_revenue`
 - `mart_monthly_booking_revenue`
@@ -381,50 +222,14 @@ Expected datasets:
 - `mart_lead_time_analysis`
 - `mart_customer_type_performance`
 
-Expected dashboard:
+## 10. Demo Notes
 
-```text
-Hotel Booking BI Dashboard
-```
+Be ready to explain:
 
-Dashboard charts must query mart datasets only.
-
-## 10. Demo Readiness
-
-Before demo:
-
-- Dashboard is saved/published, not left as Draft if possible.
-- KPI cards render without SQL errors.
-- Trend charts render.
-- Country charts are sorted and limited to Top 10 or Top 15.
-- Cancellation rates are formatted as percentages.
-- Native filters have correct scope.
-- Explain that `estimated_revenue` and `realized_revenue` are not true PNL.
-- Explain that realtime, semantic layer, Cube.dev, and Agentic AI are out of scope for this MVP.
-- Explain that Materialized Views are created in the Airflow optimization step and validate StarRocks query rewrite, while dbt marts remain the source of truth.
-
-## 11. Troubleshooting Quick Checks
-
-Service logs:
-
-```bash
-docker compose logs -f starrocks
-docker compose logs -f airflow-scheduler
-docker compose logs -f superset
-```
-
-StarRocks connection:
-
-```bash
-docker compose exec starrocks mysql -P9030 -h127.0.0.1 -uroot -e "SELECT 1;"
-```
-
-Superset driver:
-
-```bash
-docker compose exec superset python - <<'PY'
-import importlib.metadata as md
-for pkg in ["starrocks", "mysqlclient"]:
-    print(f"{pkg}=={md.version(pkg)}")
-PY
-```
+- Spark is ingestion-only in this refactor.
+- Bronze Iceberg stores append-only raw history.
+- dbt owns dedup/current/metrics/fact/dim/mart logic.
+- `record_hash` is computed in dbt, not Spark.
+- Superset queries mart views only.
+- MVs are StarRocks optimization objects, not the business source of truth.
+- This MVP is batch-only and not true PNL.

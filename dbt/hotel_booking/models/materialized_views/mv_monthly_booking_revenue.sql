@@ -1,5 +1,7 @@
 {{ config(
-    materialized='view'
+    materialized='starrocks_materialized_view',
+    distributed_by='year_number, month_number',
+    buckets=4
 ) }}
 
 SELECT

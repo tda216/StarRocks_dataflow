@@ -41,12 +41,6 @@ ICEBERG_REST_URI = os.environ.get("ICEBERG_REST_URI", "http://iceberg-rest:8181"
 ICEBERG_CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "iceberg_catalog")
 ICEBERG_DATABASE = os.environ.get("ICEBERG_DATABASE", "hotel_booking_lakehouse")
 ICEBERG_RAW_HISTORY_TABLE = os.environ.get("ICEBERG_RAW_HISTORY_TABLE", "raw_hotel_bookings_history")
-ICEBERG_SILVER_DATABASE = os.environ.get("ICEBERG_SILVER_DATABASE", "hotel_booking_silver")
-ICEBERG_SILVER_TABLES = [
-    os.environ.get("ICEBERG_SILVER_DEDUPED_TABLE", "deduped_hotel_bookings"),
-    os.environ.get("ICEBERG_SILVER_CURRENT_TABLE", "current_hotel_bookings"),
-    os.environ.get("ICEBERG_SILVER_METRICS_TABLE", "booking_metrics"),
-]
 
 SCRIPT_ENV = {
     "MINIO_EXTERNAL_ENDPOINT": MINIO_ENDPOINT,
@@ -59,10 +53,6 @@ SCRIPT_ENV = {
     "ICEBERG_CATALOG_NAME": ICEBERG_CATALOG_NAME,
     "ICEBERG_DATABASE": ICEBERG_DATABASE,
     "ICEBERG_RAW_HISTORY_TABLE": ICEBERG_RAW_HISTORY_TABLE,
-    "ICEBERG_SILVER_DATABASE": ICEBERG_SILVER_DATABASE,
-    "ICEBERG_SILVER_DEDUPED_TABLE": os.environ.get("ICEBERG_SILVER_DEDUPED_TABLE", "deduped_hotel_bookings"),
-    "ICEBERG_SILVER_CURRENT_TABLE": os.environ.get("ICEBERG_SILVER_CURRENT_TABLE", "current_hotel_bookings"),
-    "ICEBERG_SILVER_METRICS_TABLE": os.environ.get("ICEBERG_SILVER_METRICS_TABLE", "booking_metrics"),
     "ICEBERG_WAREHOUSE": os.environ.get("ICEBERG_WAREHOUSE", "s3://warehouse/"),
     "AWS_REGION": os.environ.get("AWS_REGION", "us-east-1"),
     "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
@@ -88,6 +78,9 @@ VALIDATION_TABLES = [
     "mart_cancellation_analysis",
     "mart_lead_time_analysis",
     "mart_customer_type_performance",
+    "mv_daily_booking_revenue",
+    "mv_monthly_booking_revenue",
+    "mv_hotel_performance",
 ]
 
 
@@ -197,7 +190,7 @@ def create_iceberg_external_catalog() -> None:
 
             sql = f"""
             CREATE EXTERNAL CATALOG `{ICEBERG_CATALOG_NAME}`
-            COMMENT "External catalog to Apache Iceberg Bronze/Silver tables on MinIO"
+            COMMENT "External catalog to Apache Iceberg Bronze tables on MinIO"
             PROPERTIES (
                 "type" = "iceberg",
                 "iceberg.catalog.type" = "rest",
@@ -216,14 +209,6 @@ def create_iceberg_external_catalog() -> None:
 def run_spark_iceberg_ingestion() -> None:
     _run_command(
         ["python", str(SCRIPTS_DIR / "ingest_batches_to_iceberg.py"), "--batch-dir", str(BATCH_DIR)],
-        env=SCRIPT_ENV,
-    )
-
-
-def run_spark_iceberg_silver_models() -> None:
-    """Materialize Silver Iceberg tables for dedup, current, and metrics data."""
-    _run_command(
-        ["python", str(SCRIPTS_DIR / "build_silver_iceberg_tables.py")],
         env=SCRIPT_ENV,
     )
 
@@ -255,26 +240,6 @@ def validate_iceberg_history_row_counts() -> None:
             raise AirflowException(
                 f"Iceberg row count mismatch for {batch_id}: expected={expected}, actual={actual}"
             )
-
-
-def validate_iceberg_silver_tables() -> None:
-    """Validate that Silver Iceberg tables are visible through StarRocks and non-empty."""
-    with _starrocks_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(f"SHOW TABLES FROM `{ICEBERG_CATALOG_NAME}`.`{ICEBERG_SILVER_DATABASE}`")
-            visible_tables = {row[0] for row in cursor.fetchall()}
-            missing = sorted(set(ICEBERG_SILVER_TABLES) - visible_tables)
-            if missing:
-                raise AirflowException(f"Missing Silver Iceberg tables: {missing}")
-
-            for table_name in ICEBERG_SILVER_TABLES:
-                cursor.execute(
-                    f"SELECT COUNT(*) FROM `{ICEBERG_CATALOG_NAME}`.`{ICEBERG_SILVER_DATABASE}`.`{table_name}`"
-                )
-                row_count = int(cursor.fetchone()[0])
-                print(f"{ICEBERG_SILVER_DATABASE}.{table_name}: {row_count:,} rows")
-                if row_count <= 0:
-                    raise AirflowException(f"Silver Iceberg table has no rows: {table_name}")
 
 
 def run_dbt_debug() -> None:
@@ -316,47 +281,6 @@ def run_dbt_test() -> None:
         ],
         cwd=DBT_PROJECT_DIR,
     )
-
-
-def apply_starrocks_materialized_views() -> None:
-    """Create, refresh, and validate StarRocks Materialized Views after dbt tests pass."""
-    _run_command(["python", str(SCRIPTS_DIR / "apply_starrocks_materialized_views.py")])
-
-
-def validate_materialized_view_rewrite() -> None:
-    """Fail if StarRocks does not rewrite the daily revenue aggregate to its MV."""
-    explain_sql = """
-    EXPLAIN
-    SELECT
-        arrival_date,
-        COUNT(*) AS total_bookings,
-        SUM(is_cancelled) AS cancelled_bookings,
-        COUNT(*) - SUM(is_cancelled) AS successful_bookings,
-        SUM(is_cancelled) / NULLIF(COUNT(*), 0) AS cancellation_rate,
-        SUM(total_nights) AS total_nights,
-        SUM(estimated_revenue) AS estimated_revenue,
-        SUM(realized_revenue) AS realized_revenue,
-        AVG(adr) AS average_adr
-    FROM hotel_booking.fact_bookings
-    WHERE arrival_date IS NOT NULL
-    GROUP BY arrival_date
-    """
-
-    with _starrocks_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(explain_sql)
-            explain_plan = "\n".join(str(row[0]) for row in cursor.fetchall())
-
-    print("Materialized View rewrite EXPLAIN plan:")
-    print(explain_plan)
-
-    expected_markers = ["TABLE: mv_daily_booking_revenue", "MaterializedView: true"]
-    missing_markers = [marker for marker in expected_markers if marker not in explain_plan]
-    if missing_markers:
-        raise AirflowException(
-            "Materialized View rewrite validation failed. "
-            f"Missing markers: {missing_markers}"
-        )
 
 
 def log_validation_counts() -> None:
@@ -442,17 +366,12 @@ with DAG(
     schedule_interval=None,
     catchup=False,
     max_active_runs=1,
-    tags=["hotel-booking", "iceberg", "current-state", "local-mvp"],
+    tags=["hotel-booking", "iceberg", "dbt", "local-mvp"],
 ) as dag:
-    with TaskGroup(group_id="precheck") as precheck:
+    with TaskGroup(group_id="ingestion") as ingestion:
         check_csv_exists_task = PythonOperator(
             task_id="check_csv_exists",
             python_callable=check_csv_exists,
-        )
-
-        profile_dataset_task = BashOperator(
-            task_id="profile_dataset",
-            bash_command=f"python {SCRIPTS_DIR / 'profile_dataset.py'}",
         )
 
         generate_batches_task = BashOperator(
@@ -460,9 +379,6 @@ with DAG(
             bash_command=f"python {SCRIPTS_DIR / 'generate_synthetic_batches.py'}",
         )
 
-        check_csv_exists_task >> profile_dataset_task >> generate_batches_task
-
-    with TaskGroup(group_id="ingestion") as ingestion:
         wait_for_minio_task = PythonOperator(
             task_id="wait_for_minio",
             python_callable=wait_for_minio,
@@ -511,18 +427,10 @@ with DAG(
             python_callable=validate_iceberg_history_row_counts,
         )
 
-        run_spark_silver_task = PythonOperator(
-            task_id="run_spark_iceberg_silver_models",
-            python_callable=run_spark_iceberg_silver_models,
-        )
-
-        validate_silver_tables_task = PythonOperator(
-            task_id="validate_iceberg_silver_tables",
-            python_callable=validate_iceberg_silver_tables,
-        )
-
         (
-            wait_for_minio_task
+            check_csv_exists_task
+            >> generate_batches_task
+            >> wait_for_minio_task
             >> upload_batches_to_minio_task
             >> wait_for_iceberg_rest_task
             >> run_spark_iceberg_ingestion_task
@@ -530,8 +438,6 @@ with DAG(
             >> create_starrocks_database_task
             >> create_iceberg_external_catalog_task
             >> validate_iceberg_history_task
-            >> run_spark_silver_task
-            >> validate_silver_tables_task
         )
 
     with TaskGroup(group_id="transformation") as transformation:
@@ -552,23 +458,10 @@ with DAG(
 
         dbt_debug_task >> dbt_run_task >> dbt_test_task
 
-    with TaskGroup(group_id="optimization") as optimization:
-        apply_materialized_views_task = PythonOperator(
-            task_id="apply_starrocks_materialized_views",
-            python_callable=apply_starrocks_materialized_views,
-        )
-
-        validate_materialized_view_rewrite_task = PythonOperator(
-            task_id="validate_materialized_view_rewrite",
-            python_callable=validate_materialized_view_rewrite,
-        )
-
-        apply_materialized_views_task >> validate_materialized_view_rewrite_task
-
     with TaskGroup(group_id="validation") as validation:
         log_validation_counts_task = PythonOperator(
             task_id="log_validation_counts",
             python_callable=log_validation_counts,
         )
 
-    precheck >> ingestion >> transformation >> optimization >> validation
+    ingestion >> transformation >> validation

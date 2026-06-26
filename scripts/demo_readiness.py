@@ -64,12 +64,6 @@ EXPECTED_MATERIALIZED_VIEWS = {
     "mv_hotel_performance",
 }
 
-EXPECTED_SILVER_TABLES = [
-    "deduped_hotel_bookings",
-    "current_hotel_bookings",
-    "booking_metrics",
-]
-
 
 class DemoReport:
     def __init__(self) -> None:
@@ -293,51 +287,8 @@ def check_iceberg_history(report: DemoReport, cursor: pymysql.cursors.Cursor) ->
         report.fail(f"Iceberg history check failed: {exc}")
 
 
-def check_iceberg_silver_tables(report: DemoReport, cursor: pymysql.cursors.Cursor) -> None:
-    report.section("Iceberg Silver Tables")
-    catalog = env("ICEBERG_CATALOG_NAME", "iceberg_catalog")
-    database = env("ICEBERG_SILVER_DATABASE", "hotel_booking_silver")
-    expected_tables = [
-        env("ICEBERG_SILVER_DEDUPED_TABLE", EXPECTED_SILVER_TABLES[0]),
-        env("ICEBERG_SILVER_CURRENT_TABLE", EXPECTED_SILVER_TABLES[1]),
-        env("ICEBERG_SILVER_METRICS_TABLE", EXPECTED_SILVER_TABLES[2]),
-    ]
-
-    try:
-        cursor.execute(f"SHOW DATABASES FROM `{catalog}`")
-        databases = {row[0] for row in cursor.fetchall()}
-        if database in databases:
-            report.ok(f"Silver Iceberg database visible from StarRocks: {catalog}.{database}")
-        else:
-            report.fail(f"Missing Silver Iceberg database from StarRocks: {catalog}.{database}")
-            return
-
-        cursor.execute(f"SHOW TABLES FROM `{catalog}`.`{database}`")
-        tables = {row[0] for row in cursor.fetchall()}
-        missing = sorted(set(expected_tables) - tables)
-        if missing:
-            report.fail(f"Missing Silver Iceberg tables: {missing}")
-            return
-
-        report.ok("All expected Silver Iceberg tables exist")
-        rows: list[tuple[str, int]] = []
-        for table_name in expected_tables:
-            row_count = int(
-                fetch_scalar(
-                    cursor,
-                    f"SELECT COUNT(*) FROM `{catalog}`.`{database}`.`{table_name}`",
-                )
-            )
-            rows.append((table_name, row_count))
-            if row_count <= 0:
-                report.fail(f"Silver Iceberg table has no rows: {table_name}")
-        print_rows(["table_name", "row_count"], rows)
-    except Exception as exc:
-        report.fail(f"Silver Iceberg check failed: {exc}")
-
-
 def check_dbt_objects(report: DemoReport, cursor: pymysql.cursors.Cursor) -> None:
-    report.section("dbt Views and Serving Tables")
+    report.section("dbt Views and Serving Marts")
     database = env("STARROCKS_DATABASE", "hotel_booking")
 
     cursor.execute(f"SHOW TABLES FROM `{database}`")
@@ -346,7 +297,7 @@ def check_dbt_objects(report: DemoReport, cursor: pymysql.cursors.Cursor) -> Non
     if missing_tables:
         report.fail(f"Missing dbt views/tables: {missing_tables}")
     else:
-        report.ok("All expected staging/intermediate views and fact/dim/mart tables exist")
+        report.ok("All expected staging/intermediate/fact/dim/mart views exist")
 
     count_rows: list[tuple[str, int]] = []
     for table_name in EXPECTED_STARROCKS_OBJECTS:
@@ -517,7 +468,6 @@ def main() -> int:
             with connection.cursor() as cursor:
                 check_starrocks_core(report, cursor)
                 check_iceberg_history(report, cursor)
-                check_iceberg_silver_tables(report, cursor)
                 check_dbt_objects(report, cursor)
                 check_current_state_validations(report, cursor)
                 check_materialized_views(report, cursor)

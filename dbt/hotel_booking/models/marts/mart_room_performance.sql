@@ -1,11 +1,5 @@
 {{ config(
-    materialized='table',
-    engine='OLAP',
-    table_type='DUPLICATE',
-    keys=['reserved_room_type', 'assigned_room_type'],
-    distributed_by=['reserved_room_type'],
-    buckets=8,
-    properties={'replication_num': '1'}
+    materialized='view'
 ) }}
 
 SELECT

@@ -1,11 +1,5 @@
 {{ config(
-    materialized='table',
-    engine='OLAP',
-    table_type='DUPLICATE',
-    keys=['date_day'],
-    distributed_by=['date_day'],
-    buckets=4,
-    properties={'replication_num': '1'}
+    materialized='view'
 ) }}
 
 SELECT DISTINCT

@@ -126,45 +126,38 @@ Additional ingestion metadata:
 | `etl_date` | Ingestion date in `yyyyMMdd` format. |
 | `raw_batch_sequence` | Zero-padded batch sequence from raw object path. |
 | `file_hash` | SHA-256 hash of the local batch file content. |
-| `record_hash` | SHA-256 hash of normalized business columns only. |
 | `ingested_at` | Physical ingestion timestamp. Not used for business validity. |
 | `row_ingestion_id` | Deterministic row ingestion identifier. |
 
-`record_hash` excludes ingestion metadata and derived metrics. It is used by dbt to detect business changes.
+Spark does not compute business fields such as `record_hash`, dedup, current state, or revenue metrics. Those are handled by dbt.
 
-## Iceberg Silver Tables
+## dbt Transformation Views
 
-Silver Iceberg tables:
-
-```text
-iceberg_catalog.hotel_booking_silver.deduped_hotel_bookings
-iceberg_catalog.hotel_booking_silver.current_hotel_bookings
-iceberg_catalog.hotel_booking_silver.booking_metrics
-```
-
-Spark builds these physical Silver tables from Bronze raw history:
-
-| Table | Grain | Purpose |
-| --- | --- | --- |
-| `deduped_hotel_bookings` | one row per `booking_key + batch_id + record_hash` | Removes exact duplicate/replay rows while preserving later batches for current-state selection. |
-| `current_hotel_bookings` | one current row per `booking_key` | Stores cleaned and typed latest loaded record after exact dedup. |
-| `booking_metrics` | one current booking row with derived metrics | Adds revenue, guest, stay length, lead time, and analysis bucket metrics. |
-
-dbt exposes these Silver tables through StarRocks views:
+dbt builds these views in StarRocks:
 
 ```text
+hotel_booking.stg_iceberg_raw_hotel_bookings
 hotel_booking.int_hotel_bookings_deduped
 hotel_booking.int_current_hotel_bookings
 hotel_booking.int_booking_metrics
 ```
 
-There is no separate business layer/table/model for change tracking/history in this MVP. Current-state selection is latest-record-wins after exact dedup.
+| dbt object | Grain | Purpose |
+| --- | --- | --- |
+| `stg_iceberg_raw_hotel_bookings` | raw Bronze rows | Normalizes metadata and computes business-only `record_hash`. |
+| `int_hotel_bookings_deduped` | one row per `booking_key + batch_id + record_hash` | Removes exact duplicate/replay rows while preserving later batches for current-state selection. |
+| `int_current_hotel_bookings` | one current row per `booking_key` | Selects latest loaded record after exact dedup. |
+| `int_booking_metrics` | one current booking row with derived metrics | Adds revenue, guest, stay length, lead time, and analysis bucket metrics. |
+
+`record_hash` is computed in dbt from normalized business columns only. It excludes ingestion metadata and derived metrics.
+
+There is no separate SCD2 model/layer in this MVP. Current-state selection is latest-record-wins after exact dedup.
 
 ## Current-State Metadata
 
 | Column | Meaning |
 | --- | --- |
-| `record_hash` | Business-only hash used consistently across raw history, dedup, current, and fact models. |
+| `record_hash` | Business-only hash computed in dbt staging and used for dedup/validation. |
 | `current_batch_id` | Latest batch that produced the current record. |
 | `current_batch_sequence` | Sequence of the latest batch that produced the current record. |
 
@@ -193,7 +186,7 @@ There is no separate business layer/table/model for change tracking/history in t
 | `cancellation_rate` | cancelled bookings / total bookings | For aggregated dashboards, use weighted formula `SUM(cancelled_bookings) / SUM(bookings)` or `SUM(cancelled_bookings) / SUM(total_bookings)`, not `AVG(cancellation_rate)`. |
 | `average_adr` / `avg_adr` | average of cleaned `adr` | Name differs by mart table. |
 | `lead_time_bucket` | bucket from `lead_time` | `0-7 days`, `8-30 days`, `31-90 days`, `91-180 days`, `180+ days`. |
-| `stay_length_bucket` | bucket from `total_nights` | `0 night`, `1-2 nights`, `3-5 nights`, `6-10 nights`, `10+ nights`. |
+| `stay_length_bucket` | bucket from `total_nights` | `0 nights`, `1-2 nights`, `3-5 nights`, `6-10 nights`, `10+ nights`. |
 
 ## Mart Tables for Dashboard
 

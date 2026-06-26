@@ -1,11 +1,5 @@
 {{ config(
-    materialized='table',
-    engine='OLAP',
-    table_type='DUPLICATE',
-    keys=['hotel', 'market_segment', 'distribution_channel'],
-    distributed_by=['hotel'],
-    buckets=8,
-    properties={'replication_num': '1'}
+    materialized='view'
 ) }}
 
 SELECT

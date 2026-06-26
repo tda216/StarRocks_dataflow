@@ -12,10 +12,13 @@ clean-targets:
   - "target"
   - "dbt_packages"
 
-on-run-start:
-  - "DROP VIEW IF EXISTS `{{ target.schema }}`.`int_hotel_booking_versions`"
-
 models:
   hotel_booking:
+    staging:
+      +materialized: view
+    intermediate:
+      +materialized: view
     marts:
-      +materialized: table
+      +materialized: view
+    materialized_views:
+      +materialized: starrocks_materialized_view

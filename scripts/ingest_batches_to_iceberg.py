@@ -86,7 +86,6 @@ OUTPUT_COLUMNS = [
     "source_file_name",
     "source_object_path",
     "file_hash",
-    "record_hash",
     "ingested_at",
     "row_ingestion_id",
     "synthetic_operation",
@@ -199,7 +198,6 @@ def create_table_if_needed(spark: SparkSession, table_name: str) -> None:
         source_file_name STRING,
         source_object_path STRING,
         file_hash STRING,
-        record_hash STRING,
         ingested_at TIMESTAMP,
         row_ingestion_id STRING,
         synthetic_operation STRING,
@@ -223,6 +221,7 @@ def create_table_if_needed(spark: SparkSession, table_name: str) -> None:
             raise
     ensure_table_columns(spark, table_name)
     ensure_etl_partition_spec(spark, table_name)
+    drop_legacy_table_columns(spark, table_name)
 
 
 def ensure_table_columns(spark: SparkSession, table_name: str) -> None:
@@ -321,6 +320,26 @@ def ensure_etl_partition_spec(spark: SparkSession, table_name: str) -> None:
                 )
 
 
+def drop_legacy_table_columns(spark: SparkSession, table_name: str) -> None:
+    existing_columns = {
+        row["col_name"]
+        for row in spark.sql(f"DESCRIBE TABLE {table_name}").collect()
+        if row["col_name"] and not str(row["col_name"]).startswith("#")
+    }
+
+    for legacy_column in ("record_hash", "watermark_date"):
+        if legacy_column not in existing_columns:
+            continue
+        try:
+            spark.sql(f"ALTER TABLE {table_name} DROP COLUMN {legacy_column}")
+            print(f"Dropped legacy Bronze Iceberg column: {table_name}.{legacy_column}")
+        except Exception as exc:
+            print(
+                f"Could not drop legacy Bronze column {legacy_column}; "
+                f"existing table may require a clean rebuild if append fails: {exc}"
+            )
+
+
 def batch_already_ingested(spark: SparkSession, table_name: str, batch_id: str) -> bool:
     count = spark.sql(
         f"SELECT COUNT(*) AS row_count FROM {table_name} WHERE batch_id = '{batch_id}'"
@@ -343,10 +362,6 @@ def read_and_enrich_batch(
 
     df = spark.read.option("header", "true").schema(schema).csv(s3a_uri)
 
-    normalized_business_columns = [
-        F.lower(F.trim(F.coalesce(F.col(column).cast("string"), F.lit("")))) for column in SOURCE_COLUMNS
-    ]
-
     df = (
         df.withColumn("original_source_row_number", F.col("original_source_row_number").cast("bigint"))
         .withColumn("batch_sequence", F.col("batch_sequence").cast("int"))
@@ -360,17 +375,16 @@ def read_and_enrich_batch(
         .withColumn("source_file_name", F.lit(local_batch_file.name))
         .withColumn("source_object_path", F.lit(source_object_path))
         .withColumn("file_hash", F.lit(file_hash))
-        .withColumn("record_hash", F.sha2(F.concat_ws("||", *normalized_business_columns), 256))
         .withColumn("ingested_at", F.current_timestamp())
         .withColumn(
             "row_ingestion_id",
             F.sha2(
                 F.concat_ws(
                     "||",
+                    F.lit(source_object_path),
                     F.col("booking_key"),
                     F.col("batch_id"),
                     F.col("batch_row_number").cast("string"),
-                    F.col("record_hash"),
                 ),
                 256,
             ),

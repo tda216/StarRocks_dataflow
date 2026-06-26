@@ -2,6 +2,16 @@
     materialized='view'
 ) }}
 
+WITH ranked AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY booking_key, batch_id, record_hash
+            ORDER BY row_ingestion_id, ingested_at
+        ) AS duplicate_rank
+    FROM {{ ref('stg_iceberg_raw_hotel_bookings') }}
+)
+
 SELECT
     source_dataset,
     original_source_row_number,
@@ -54,4 +64,5 @@ SELECT
     total_of_special_requests,
     reservation_status,
     reservation_status_date
-FROM `{{ env_var('ICEBERG_CATALOG_NAME', 'iceberg_catalog') }}`.`{{ env_var('ICEBERG_SILVER_DATABASE', 'hotel_booking_silver') }}`.`{{ env_var('ICEBERG_SILVER_DEDUPED_TABLE', 'deduped_hotel_bookings') }}`
+FROM ranked
+WHERE duplicate_rank = 1

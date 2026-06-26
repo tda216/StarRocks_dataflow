@@ -43,7 +43,7 @@ models:
           - not_null
 
   - name: int_hotel_bookings_deduped
-    description: StarRocks view over Silver Iceberg deduped_hotel_bookings. Exact duplicates are removed by booking_key, batch_id, and record_hash during the Spark Silver build.
+    description: dbt view that removes exact duplicate/replay rows by booking_key, batch_id, and dbt-computed record_hash.
     columns:
       - name: booking_key
         tests:
@@ -56,7 +56,7 @@ models:
           - not_null
 
   - name: int_current_hotel_bookings
-    description: StarRocks view over Silver Iceberg current_hotel_bookings. Contains cleaned and typed latest loaded record per booking_key after exact dedup.
+    description: dbt view that selects the latest loaded record per booking_key after exact dedup.
     columns:
       - name: booking_key
         description: Stable booking key from generated batches.
@@ -75,7 +75,7 @@ models:
         description: Source cancellation flag cast to integer.
 
   - name: int_booking_metrics
-    description: StarRocks view over Silver Iceberg booking_metrics. Contains current booking-level derived metrics and analysis buckets.
+    description: dbt view that applies type casting, cleaning, derived revenue metrics, and analysis buckets.
     columns:
       - name: booking_key
         description: Stable booking key used by current/fact models.
@@ -104,7 +104,7 @@ models:
           - non_negative
 
   - name: fact_bookings
-    description: Booking-level fact table for downstream marts and Superset.
+    description: Booking-level fact view for downstream marts and Superset.
     tests:
       - not_empty
     columns:
@@ -307,6 +307,33 @@ models:
 
   - name: mart_simulated_pnl
     description: Optional simulated PNL mart. Cost and margin fields are simulated, not real finance data.
+    tests:
+      - not_empty
+    columns:
+      - name: hotel
+        tests:
+          - not_null
+
+  - name: mv_daily_booking_revenue
+    description: dbt-managed StarRocks Materialized View for daily booking and revenue aggregates.
+    tests:
+      - not_empty
+    columns:
+      - name: arrival_date
+        tests:
+          - not_null
+
+  - name: mv_monthly_booking_revenue
+    description: dbt-managed StarRocks Materialized View for monthly booking and revenue aggregates.
+    tests:
+      - not_empty
+    columns:
+      - name: month_start_date
+        tests:
+          - not_null
+
+  - name: mv_hotel_performance
+    description: dbt-managed StarRocks Materialized View for hotel-level performance aggregates.
     tests:
       - not_empty
     columns:

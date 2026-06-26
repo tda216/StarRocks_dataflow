@@ -1,306 +1,125 @@
 # StarRocks Dataflow
 
-## Mục tiêu POC
+## Mục đích POC
 
-POC này validate một **local batch BI dataflow** cho bài toán **Hotel Booking Analytics**. Mục tiêu chính là kiểm tra cách StarRocks có thể đóng vai trò:
+POC này xây dựng một batch BI flow theo kiến trúc lakehouse cho bài toán Hotel Booking Analytics:
 
-- query dữ liệu từ lakehouse layer thông qua **External Catalog**
-- materialize **Gold fact/dim/mart tables** vào StarRocks internal storage
-- serve mart tables cho **Superset dashboard**
-- tối ưu một số dashboard query lặp lại bằng **Materialized View + Query Rewrite**
+```text
+Generated batch CSVs
+-> MinIO raw CSV
+-> Spark Bronze Iceberg append-only raw history
+-> StarRocks External Catalog
+-> dbt staging / dedup / current / metrics / fact / dim / mart views
+-> dbt-managed StarRocks Materialized Views
+-> Superset mart dashboard
+```
 
-POC này tập trung vào **functional feasibility** và **architecture design**, không phải performance benchmark chính thức.
+Mục tiêu là validate StarRocks có thể query Iceberg qua External Catalog và serve dashboard layer. Đây không phải performance benchmark chính thức, chưa triển khai realtime, Cube.dev, semantic layer hoặc Agentic AI.
 
-## 1. Layer & Storage Design
+## Kiến trúc
 
 ```mermaid
 flowchart LR
-    %% =========================
-    %% Class Definitions
-    %% =========================
-    classDef source fill:#f8fafc,stroke:#475569,stroke-width:1.2px,color:#0f172a;
-    classDef bronze fill:#b7791f,stroke:#78350f,stroke-width:1.2px,color:#ffffff;
-    classDef silver fill:#e5e7eb,stroke:#6b7280,stroke-width:1.2px,color:#111827;
-    classDef gold fill:#fde68a,stroke:#b45309,stroke-width:1.2px,color:#111827;
-    classDef catalog fill:#ede9fe,stroke:#7c3aed,stroke-width:1.2px,color:#3b0764;
-    classDef bi fill:#dbeafe,stroke:#2563eb,stroke-width:1.2px,color:#1e3a8a;
-    classDef cluster fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px,stroke-dasharray: 4 4,color:#0f172a;
+    A["Original CSV<br/>hotel_bookings.csv"]
+    B["Generated batch CSVs<br/>stable booking_key"]
+    C["MinIO raw CSV<br/>etl_year/month/day"]
+    D["Spark Bronze ingest<br/>technical metadata only"]
+    E["Iceberg Bronze<br/>raw_hotel_bookings_history"]
+    F["StarRocks<br/>External Catalog"]
+    G["dbt views<br/>stg / dedup / current / metrics / marts"]
+    H["dbt-managed MVs<br/>selected aggregate acceleration"]
+    I["Superset<br/>mart dashboard"]
 
-    %% =========================
-    %% Nodes
-    %% =========================
-    A[/"Original CSV"/]:::source
-
-    subgraph S1["Raw Storage"]
-        B[("MinIO Raw<br/>partitioned batch")]:::source
-    end
-
-    subgraph S2["Iceberg Lakehouse"]
-        C[("Bronze<br/>raw_history")]:::bronze
-        D[("Silver<br/>deduped / current / metrics")]:::silver
-    end
-
-    subgraph S3["StarRocks Serving Layer"]
-        E["External Catalog<br/>Iceberg access"]:::catalog
-        F[("Gold Tables<br/>fact / dim / mart")]:::gold
-        G[("Materialized Views<br/>query rewrite")]:::gold
-    end
-
-    subgraph S4["BI Layer"]
-        H{{"Superset<br/>dashboard"}}:::bi
-    end
-
-    %% =========================
-    %% Cluster Styling
-    %% =========================
-    class S1,S2,S3,S4 cluster
-
-    %% =========================
-    %% Flow
-    %% =========================
-    A -->|Python generate<br/>+ upload| B
-    B -->|Spark ingest| C
-    C -->|Build silver models| D
-    D -->|Query Iceberg tables| E
-    E -->|dbt run / test| F
-
-    F -->|Dashboard queries| H
-    F --> G
-    G -.->|Automatic query rewrite| H
+    A --> B --> C --> D --> E --> F --> G --> I
+    G --> H
+    H -. "query rewrite demo" .-> I
 ```
 
-| Layer | Tool / Format | Storage / Object | Responsibility |
-| --- | --- | --- | --- |
-| Source | CSV | `data/input/hotel_bookings.csv` | Original Kaggle dataset. |
-| Synthetic batch layer | Python-generated CSV | `data/input/incremental_batches/batch_*.csv` | Generate deterministic incremental batches with persisted `booking_key`, updates, duplicate replay and edge-case fixtures. |
-| Raw landing | MinIO / CSV | `hotel-booking-raw/.../etl_year=.../etl_month=.../etl_day=.../raw_batch_sequence=.../batch_*.csv` | Immutable raw batch files for replay, audit and debug. |
-| Bronze lakehouse | Iceberg / Parquet on MinIO | `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` | Append-only raw historical records, partitioned by `etl_date`. |
-| Silver lakehouse | Iceberg / Parquet on MinIO | `iceberg_catalog.hotel_booking_silver.*` | Physical dedup, current state and metrics tables built by Spark. |
-| External catalog | StarRocks External Catalog | `iceberg_catalog` | StarRocks reads Iceberg tables without owning their storage or table type. |
-| dbt staging/intermediate | dbt + StarRocks views | `stg_*`, `int_*` | Expose Bronze/Silver Iceberg objects as StarRocks views and run validation tests. |
-| Gold serving | StarRocks internal tables | `fact_bookings`, `dim_*`, `mart_*` | Materialized dbt serving layer for BI. |
-| Optimization | StarRocks Materialized Views | `mv_daily_booking_revenue`, `mv_monthly_booking_revenue`, `mv_hotel_performance` | Precompute selected aggregations and validate query rewrite. |
-| Dashboard | Superset | Datasets from `mart_*` tables | BI visualization from StarRocks mart tables. |
+Layer responsibility:
 
-## 2. Dataset
-
-Dataset sử dụng: **Hotel Booking Demand**
-
-- Rows: `119,390`
-- Columns: `32`
-- Grain: `1 row = 1 hotel booking record`
-- Domain fit: hospitality / hotel / resort BI
-
-Dataset có các chiều phân tích phù hợp với dashboard:
-
-- `hotel`
-- `arrival_date`
-- `room type`
-- `market_segment`
-- `distribution_channel`
-- `country`
-- `customer_type`
-- `lead_time`
-- `is_canceled`
-- `adr`
-
-Dataset không có real cost/expense, nên đây **không phải true PNL dataset**. Các metrics như `estimated_revenue` và `realized_revenue` được derive từ `adr * total_nights`.
-
-## 3. Raw MinIO Storage
-
-Raw batch files được lưu immutable trên MinIO theo Hive-style ingestion partition.
-
-Ví dụ path:
-
-```text
-hotel-booking-raw/
-  hotel_booking_demand/
-    incremental_batches/
-      etl_year=2026/
-        etl_month=01/
-          etl_day=01/
-            raw_batch_sequence=001/
-              batch_001_initial.csv
-```
-
-Lý do dùng partition path:
-
-- dễ audit batch nào được ingest vào ngày nào
-- dễ replay/debug từng batch
-- dễ cleanup/retention theo `etl_year/etl_month/etl_day`
-- tránh lưu raw files trong một flat folder khó quản lý
-
-Current generated batch files:
-
-| Batch file | Purpose | Expected row count |
-| --- | --- | ---: |
-| `batch_001_initial.csv` | Initial business state | 119,390 |
-| `batch_002_updates.csv` | Selected changed records, exact duplicates and new records | 17 |
-| `batch_003_duplicate_replay.csv` | Replay duplicates to test idempotency | 15 |
-| `batch_004_same_state.csv` | `A -> A -> A` fixture; latest same-state batch should become current without inflating counts | 1 |
-| `batch_005_reverted_state.csv` | `A -> B -> A` fixture; latest reverted batch should become current deterministically | 1 |
-
-## 4. Iceberg Storage
-
-Iceberg stores table metadata and physical Parquet files in the MinIO `warehouse` bucket.
-
-Điểm quan trọng:
-
-- MinIO raw bucket chỉ lưu immutable CSV batch files.
-- Iceberg quản lý table metadata, snapshots, manifests và physical Parquet files.
-- Không nên debug Iceberg bằng cách đọc trực tiếp folder Parquet.
-- Nên inspect lineage qua SQL columns như `source_object_path`, `file_hash`, `etl_date`, `batch_id`, `batch_sequence`.
-- Raw MinIO path dùng `etl_year/etl_month/etl_day`; Iceberg dùng logical partition `etl_date`. Hai phần này cùng đại diện cho ingestion date nhưng phục vụ hai tầng storage khác nhau.
-- Khi Silver có nhiều Parquet files, không cần tự kiểm soát thứ tự file. Iceberg quản lý snapshot/manifest; thứ tự business được kiểm soát bằng `batch_sequence`, `batch_effective_at`, `batch_row_number` và `row_ingestion_id`.
-
-### 4.1 Bronze Iceberg
-
-| Table | Purpose | Partition |
+| Layer | Tool | Vai trò |
 | --- | --- | --- |
-| `iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history` | Append-only raw historical records with ingestion metadata and business-only `record_hash` | `etl_date` |
+| Source | CSV | File gốc tại `data/input/hotel_bookings.csv`. |
+| Batch generation | Python | Tạo incremental batch CSVs và persist `booking_key`. |
+| Raw landing | MinIO | Lưu immutable raw CSV theo ingestion partition. |
+| Bronze | Spark + Iceberg | Append-only raw history, schema kỹ thuật và ingestion metadata. |
+| External access | StarRocks External Catalog | StarRocks query Iceberg table, không sở hữu Iceberg storage. |
+| Transform/test | dbt + StarRocks | Dedup, current, metrics, fact/dim/mart views, data tests. |
+| Optimization | dbt-managed StarRocks MV | Tạo/refesh một số Materialized Views trong `dbt run`. |
+| BI | Superset | Dashboard query mart views only. |
 
-Bronze table giữ toàn bộ raw history theo batch. Đây là nơi phục vụ replay, audit và kiểm tra incremental load.
+Spark chỉ ingest batch CSV vào Bronze Iceberg. Spark không tính `record_hash`, không dedup, không chọn current record, không tính business metrics.
 
-### 4.2 Silver Iceberg
+dbt xử lý:
 
-| Table | Purpose |
-| --- | --- |
-| `deduped_hotel_bookings` | Exact duplicate collapse by `booking_key + batch_id + record_hash` |
-| `current_hotel_bookings` | Latest loaded record per `booking_key` after exact dedup |
-| `booking_metrics` | Typed, cleaned metrics table with derived fields for Gold dbt models |
+- `stg_iceberg_raw_hotel_bookings`: normalize fields và compute business-only `record_hash`.
+- `int_hotel_bookings_deduped`: exact dedup theo `booking_key + batch_id + record_hash`.
+- `int_current_hotel_bookings`: chọn latest record theo `batch_sequence`, `batch_effective_at`, `batch_row_number`.
+- `int_booking_metrics`: type casting, cleaning, revenue metrics, lead-time/stay buckets.
+- `fact_bookings`, `dim_*`, `mart_*`: dbt views cho Superset.
+- `mv_*`: dbt-managed StarRocks Materialized Views.
 
-Silver tables là physical Iceberg tables được build bởi Spark. Việc để Silver ở Iceberg giúp phát huy ưu điểm của lakehouse: lưu intermediate/checkpoint data ngoài StarRocks internal storage, giảm áp lực SSD/storage cho StarRocks, đồng thời giữ khả năng audit/replay.
+## Local Resource Constraints
 
-## 5. Incremental, Dedup & Current-State Logic
+- 16GB RAM preferred.
+- 8GB RAM có thể chạy với conservative limits, nhưng StarRocks + Airflow + Superset + Spark có thể nặng.
+- Nếu service bị OOM, tăng Docker Desktop memory hoặc tắt bớt service khi không demo.
+- dbt threads nên giữ `1` hoặc `2`.
 
-### 5.1 Stable Key
+## Dataset Placement
+
+Đặt Kaggle file tại:
 
 ```text
-booking_key = source_dataset + ':' + original_source_row_number
+data/input/hotel_bookings.csv
 ```
 
-`booking_key` được generate một lần bởi `scripts/generate_synthetic_batches.py` và được persist trong mọi generated batch file.
-
-Spark **không được regenerate** key này bằng non-deterministic `row_number()`, vì như vậy các batch sau có thể không match đúng business entity.
-
-### 5.2 Hash Rule
-
-`record_hash` được compute từ normalized business columns only.
-
-Excluded from `record_hash`:
-
-- `batch_id`
-- `batch_sequence`
-- `source_file_name`
-- `source_object_path`
-- `file_hash`
-- `ingested_at`
-- `row_ingestion_id`
-- `synthetic_operation`
-- derived metrics như `estimated_revenue`, `realized_revenue`, `cancellation_rate`
-
-Lý do: `record_hash` phải đại diện cho **business state**, không phải ingestion metadata. Nếu metadata được đưa vào hash, cùng một business record ingest lại ở batch khác sẽ bị hiểu nhầm là business change.
-
-### 5.3 Exact Dedup
-
-Silver exact dedup loại duplicate/replay records theo key:
+Batch files sẽ được generate vào:
 
 ```text
-booking_key + batch_id + record_hash
+data/input/incremental_batches/
 ```
 
-Logic này chỉ remove duplicate trong cùng batch, không global dedup theo `booking_key + record_hash`. Nhờ vậy các batch sau vẫn được giữ lại để chọn bản ghi latest/current.
+## Start Services
 
-### 5.4 Current-State Derivation
-
-POC này không triển khai một business layer hoặc model riêng cho change tracking/history. Logic này được gộp vào bước build `current_hotel_bookings` để xác định bản hiện tại.
-
-Trong POC này:
-
-- Spark Silver build xác định current record bằng `booking_key`, `batch_sequence`, `batch_effective_at`, `batch_row_number` và `row_ingestion_id`
-- không materialize table/model change-history riêng
-- dashboard và marts chỉ đi từ current/metrics/fact/mart
-
-Current-state logic:
-
-- order records by `booking_key`, `batch_sequence`, `batch_effective_at`
-- không so sánh với previous `record_hash` để quyết định current
-- latest loaded record được chọn bằng `ROW_NUMBER() ... ORDER BY batch_sequence DESC, batch_effective_at DESC, batch_row_number DESC, row_ingestion_id DESC`
-
-Expected behavior:
-
-| Case | Expected behavior |
-| --- | --- |
-| `A -> A -> A` | Batch mới nhất vẫn là current, nhưng không làm tăng current/fact/mart counts |
-| `A -> B -> A` | Batch reverted mới nhất trở thành current deterministically |
-| Duplicate replay | Không làm tăng current/fact/mart counts |
-| Same `booking_key + batch_id` nhưng nhiều `record_hash` | Validation fails |
-
-## 6. dbt Models
-
-dbt chạy qua StarRocks. dbt không đọc trực tiếp file trong MinIO.
-
-Actual flow:
-
-```text
-MinIO raw CSV
--> Bronze Iceberg
--> Silver Iceberg
--> StarRocks External Catalog
--> dbt views over Iceberg
--> StarRocks internal Gold fact/dim/mart tables
+```bash
+cp .env.example .env
+docker compose config
+docker compose up -d --build
 ```
 
-| dbt object | Type | Source | Purpose |
-| --- | --- | --- | --- |
-| `stg_iceberg_raw_hotel_bookings` | View | Bronze Iceberg raw history | Expose raw history with typed metadata |
-| `int_hotel_bookings_deduped` | View | Silver `deduped_hotel_bookings` | Expose deduped records |
-| `int_current_hotel_bookings` | View | Silver `current_hotel_bookings` | Expose current state |
-| `int_booking_metrics` | View | Silver `booking_metrics` | Expose cleaned metrics for Gold models |
-| `fact_bookings` | Internal table | `int_booking_metrics` | Booking-level Gold fact, stable by `booking_key` |
-| `dim_*` | Internal tables | `int_booking_metrics` | Analysis dimensions |
-| `mart_*` | Internal tables | `fact_bookings` / `dim_*` | Superset-ready aggregated marts |
+Open UIs:
 
-## 7. StarRocks Table Type Strategy
+| UI | URL | Default login |
+| --- | --- | --- |
+| MinIO | `http://localhost:9001` | `minioadmin` / `minioadmin` |
+| Airflow | `http://localhost:8080` | `admin` / `admin` |
+| Superset | `http://localhost:8088` | `admin` / `admin` |
+| StarRocks FE | `http://localhost:8030` | if enabled by image |
 
-StarRocks table type ảnh hưởng tới cách data được lưu, merge, replace hoặc aggregate trong StarRocks internal storage.
+Stop services:
 
-| Object | Storage owner | StarRocks type | Reason |
-| --- | --- | --- | --- |
-| Bronze/Silver Iceberg tables | Iceberg | Not applicable | External tables are managed by Iceberg, not StarRocks internal storage |
-| `stg_*`, `int_*` | StarRocks view definitions over Iceberg | View | Keep stg/int lightweight and avoid duplicating Silver storage into StarRocks SSD |
-| `fact_bookings` | StarRocks internal | `PRIMARY KEY(booking_key)` | Stable one row per current booking, used as serving fact and MV source |
-| `dim_*` | StarRocks internal | `DUPLICATE KEY` in current MVP | Small full-refresh dimension tables generated from `SELECT DISTINCT`; uniqueness is controlled by dbt SQL/tests |
-| `mart_*` | StarRocks internal | `DUPLICATE KEY` | Aggregated serving tables rebuilt by dbt full-refresh in local MVP |
-| `mv_*` | StarRocks internal MV | Materialized View | Precompute selected aggregations and validate query rewrite |
-
-Note về `dim_*`:
-
-- Current MVP dùng `DUPLICATE KEY` cho `dim_*` vì dimension tables nhỏ, được full-refresh và uniqueness do dbt kiểm soát.
-- Nếu production hoặc muốn semantic chặt hơn, stable current dimensions nên dùng `PRIMARY KEY(dimension_key)`.
-- Historical dimensions chưa nằm trong scope MVP này.
-
-## 8. Airflow Pipeline
-
-Airflow orchestrates batch pipeline theo 5 nhóm chính:
-
-```text
-precheck
--> ingestion
--> transformation
--> optimization
--> validation
+```bash
+docker compose down
 ```
 
-Detailed flow:
+`docker compose down` giữ named volumes. `docker compose down -v` xóa volumes, gồm MinIO objects, Iceberg warehouse, StarRocks metadata/data, Airflow metadata và Superset metadata.
+
+## Run Pipeline
+
+Manual Airflow trigger:
+
+```bash
+docker compose exec airflow-webserver airflow dags unpause hotel_booking_pipeline
+docker compose exec airflow-webserver airflow dags trigger hotel_booking_pipeline
+```
+
+DAG flow hiện tại:
 
 ```text
-precheck:
+ingestion
   check_csv_exists
-  profile_dataset
   generate_synthetic_batches
-
-ingestion:
   wait_for_minio
   upload_batches_to_minio
   wait_for_iceberg_rest
@@ -309,77 +128,73 @@ ingestion:
   create_starrocks_database
   create_iceberg_external_catalog
   validate_iceberg_history_row_counts
-  run_spark_iceberg_silver_models
-  validate_iceberg_silver_tables
 
-transformation:
+transformation
   dbt_debug
   dbt_run
   dbt_test
 
-optimization:
-  apply_starrocks_materialized_views
-  validate_materialized_view_rewrite
-
-validation:
+validation
   log_validation_counts
 ```
 
-Superset không nằm trong Airflow DAG vì Superset là BI serving/consumer layer. DAG chỉ build và validate data layer. Sau khi DAG chạy xong, Superset query mart tables để render dashboard.
+`dbt run` tạo/refesh Materialized Views vì MV đã được đưa vào dbt model group `materialized_views`.
 
-## 9. Validation
+## Manual dbt Commands
 
-| Validation area | Implementation |
-| --- | --- |
-| Dataset exists | Airflow `check_csv_exists`, local file check |
-| Raw MinIO objects | `scripts/demo_readiness.py` checks 5 partitioned raw batch objects |
-| Bronze row count | Airflow compares generated CSV row count with Iceberg raw history count by `batch_id` |
-| Silver tables | Airflow checks Silver Iceberg tables are visible from StarRocks and non-empty |
-| Multiple states per batch | dbt custom tests fail if one `booking_key + batch_id` has multiple distinct `record_hash` |
-| Current-state row count | dbt custom test checks current row count equals distinct `booking_key` count |
-| Fixture behavior | dbt tests validate `A -> A -> A` chọn batch same-state mới nhất và `A -> B -> A` ends with reverted current state |
-| dbt result | `dbt run` and `dbt test` must pass after Silver tables are rebuilt |
-| MV validation | Checks MV exists, active, `query_rewrite_status = VALID`, totals match marts, and `EXPLAIN` uses `mv_daily_booking_revenue` |
+```bash
+docker compose exec airflow-webserver dbt debug \
+  --project-dir /opt/airflow/dbt/hotel_booking \
+  --profiles-dir /opt/airflow/dbt/hotel_booking
 
-Current row count snapshot:
+docker compose exec airflow-webserver dbt run \
+  --project-dir /opt/airflow/dbt/hotel_booking \
+  --profiles-dir /opt/airflow/dbt/hotel_booking \
+  --no-partial-parse \
+  --threads 1
 
-| Object | Row count |
-| --- | ---: |
-| Bronze raw history | 119,424 |
-| Silver `deduped_hotel_bookings` | 119,422 |
-| Silver `current_hotel_bookings` | 119,395 |
-| Silver `booking_metrics` | 119,395 |
-| Gold `fact_bookings` | 119,395 |
-| `mart_daily_booking_revenue` | 793 |
-| `mart_monthly_booking_revenue` | 26 |
-| `mart_hotel_performance` | 2 |
-
-Lưu ý: row count snapshot là kết quả của generated batches hiện tại. Nếu batch generator thay đổi, số liệu validation cần được cập nhật lại.
-
-## 10. Materialized View
-
-Materialized Views là optimization layer trong StarRocks. MVs được tạo/refreshed sau khi `dbt_test` pass.
-
-| MV | Source | Validation |
-| --- | --- | --- |
-| `mv_daily_booking_revenue` | `fact_bookings` | Totals match `mart_daily_booking_revenue`; `EXPLAIN` rewrite validated |
-| `mv_monthly_booking_revenue` | `fact_bookings` | Totals match `mart_monthly_booking_revenue` |
-| `mv_hotel_performance` | `fact_bookings` | Totals match `mart_hotel_performance` |
-
-Important distinction:
-
-```text
-dbt mart tables = business source of truth for dashboard
-Materialized Views = StarRocks optimization layer
-Superset = query mart datasets by default
-StarRocks may rewrite matching queries to MV internally
+docker compose exec airflow-webserver dbt test \
+  --project-dir /opt/airflow/dbt/hotel_booking \
+  --profiles-dir /opt/airflow/dbt/hotel_booking \
+  --no-partial-parse \
+  --threads 1
 ```
 
-## 11. Dashboard
+## Validation SQL
 
-Superset dashboard dùng **StarRocks mart tables only**.
+```sql
+SHOW CATALOGS;
+SHOW DATABASES FROM iceberg_catalog;
+SHOW TABLES FROM iceberg_catalog.hotel_booking_lakehouse;
+SHOW TABLES FROM hotel_booking;
+SHOW MATERIALIZED VIEWS FROM hotel_booking;
 
-Allowed datasets:
+SELECT batch_id, COUNT(*) AS row_count
+FROM iceberg_catalog.hotel_booking_lakehouse.raw_hotel_bookings_history
+GROUP BY batch_id
+ORDER BY batch_id;
+
+SELECT COUNT(*) FROM hotel_booking.fact_bookings;
+SELECT COUNT(*) FROM hotel_booking.mart_channel_performance;
+SELECT COUNT(*) FROM hotel_booking.mv_daily_booking_revenue;
+```
+
+Run demo checks:
+
+```bash
+docker compose exec airflow-webserver python /opt/airflow/scripts/check_connections.py
+docker compose exec airflow-webserver python /opt/airflow/scripts/demo_readiness.py
+```
+
+## Superset
+
+Connection URI:
+
+```text
+starrocks://root:@starrocks:9030/default_catalog.hotel_booking
+```
+
+Dashboard should use mart objects only:
 
 - `mart_daily_booking_revenue`
 - `mart_monthly_booking_revenue`
@@ -392,47 +207,27 @@ Allowed datasets:
 - `mart_lead_time_analysis`
 - `mart_customer_type_performance`
 
-Do not use:
+Do not build charts from raw/staging/intermediate/fact/dim objects.
 
-- raw tables
-- staging/intermediate views
-- technical change-history tables
-- fact table
-- dimension tables
+## Known Limitations
 
-Lý do: mart tables đã được aggregate theo use case dashboard. Nếu dashboard query raw/staging/intermediate/fact trực tiếp, business logic sẽ bị phân tán vào BI layer và dễ gây double count.
+- Batch-only MVP.
+- Synthetic `booking_key` is for demo only; production should use source booking/reservation ID.
+- Bronze Iceberg stores raw history, not business-ready curated tables.
+- dbt models are mostly views, so query performance depends on StarRocks + Iceberg access unless MV rewrite applies.
+- Materialized Views cover only selected aggregate queries for demo.
+- dbt-managed MVs are asynchronous StarRocks Materialized Views over dbt views; this requires a StarRocks version that supports MVs over existing views.
+- Superset dashboard metadata may be reset if Superset volume is removed.
 
-## 12. Scope & Limitations
+## Troubleshooting
 
-Included:
+If Iceberg append fails after switching from the older Silver/Spark version, first retry the DAG. Spark ingestion now tries to drop legacy Bronze columns such as `record_hash` and `watermark_date`.
 
-- batch-only pipeline
-- MinIO raw landing
-- Bronze/Silver Iceberg on MinIO
-- StarRocks External Catalog
-- dbt views and Gold internal tables
-- StarRocks Materialized View + Query Rewrite validation
-- Superset dashboard from mart tables
+If Iceberg metadata is already inconsistent from previous local experiments, reset local volumes:
 
-Not included:
+```bash
+docker compose down -v
+docker compose up -d --build
+```
 
-- realtime / streaming
-- Cube.dev
-- semantic layer
-- Agentic AI
-- formal performance benchmark
-- real PNL, real cost, real profit calculation
-
-## 13. Final Takeaway
-
-So với MVP ban đầu chỉ load CSV vào StarRocks, flow hiện tại production-like hơn:
-
-- raw batch files được lưu immutable trên MinIO
-- Iceberg quản lý Bronze/Silver historical and intermediate tables
-- Spark xử lý ingestion, dedup, current state và metrics ở lakehouse layer
-- StarRocks đọc Iceberg qua External Catalog
-- dbt expose Silver bằng views và materialize Gold fact/dim/mart internal tables
-- Superset chỉ đọc mart tables
-- StarRocks MV validate khả năng query rewrite và serving optimization
-
-Trade-off là local setup phức tạp hơn vì có thêm MinIO, Spark, Iceberg REST Catalog, StarRocks, dbt, Airflow và Superset. Tuy nhiên flow này thể hiện rõ hơn vai trò của Iceberg cho lakehouse storage và StarRocks cho serving/optimization layer.
+This deletes MinIO objects, Iceberg warehouse files, StarRocks data, Airflow metadata and Superset metadata.
