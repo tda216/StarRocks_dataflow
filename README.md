@@ -1,4 +1,4 @@
-# StarRocks Dataflow - Trịnh Đức An (S.AI.20K)
+# StarRocks Dataflow
 
 ## Mục tiêu POC
 
@@ -15,23 +15,58 @@ POC này tập trung vào **functional feasibility** và **architecture design**
 
 ```mermaid
 flowchart LR
-    A["Original CSV"]
-    B["MinIO raw<br/>partitioned batch"]
-    C["Bronze Iceberg<br/>raw_history"]
-    D["Silver Iceberg<br/>deduped / current / metrics"]
-    E["StarRocks<br/>External Catalog"]
-    F["StarRocks Gold<br/>fact / dim / mart tables"]
-    G["StarRocks MVs<br/>query rewrite"]
-    H["Superset<br/>mart dashboard"]
+    %% =========================
+    %% Class Definitions
+    %% =========================
+    classDef source fill:#f8fafc,stroke:#475569,stroke-width:1.2px,color:#0f172a;
+    classDef bronze fill:#b7791f,stroke:#78350f,stroke-width:1.2px,color:#ffffff;
+    classDef silver fill:#e5e7eb,stroke:#6b7280,stroke-width:1.2px,color:#111827;
+    classDef gold fill:#fde68a,stroke:#b45309,stroke-width:1.2px,color:#111827;
+    classDef catalog fill:#ede9fe,stroke:#7c3aed,stroke-width:1.2px,color:#3b0764;
+    classDef bi fill:#dbeafe,stroke:#2563eb,stroke-width:1.2px,color:#1e3a8a;
+    classDef cluster fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px,stroke-dasharray: 4 4,color:#0f172a;
 
-    A -- "Python generate + upload" --> B
-    B -- "Spark ingest" --> C
-    C -- "Spark build" --> D
-    D -- "StarRocks reads Iceberg" --> E
-    E -- "dbt run/test" --> F
-    F --> H
+    %% =========================
+    %% Nodes
+    %% =========================
+    A[/"Original CSV"/]:::source
+
+    subgraph S1["Raw Storage"]
+        B[("MinIO Raw<br/>partitioned batch")]:::source
+    end
+
+    subgraph S2["Iceberg Lakehouse"]
+        C[("Bronze<br/>raw_history")]:::bronze
+        D[("Silver<br/>deduped / current / metrics")]:::silver
+    end
+
+    subgraph S3["StarRocks Serving Layer"]
+        E["External Catalog<br/>Iceberg access"]:::catalog
+        F[("Gold Tables<br/>fact / dim / mart")]:::gold
+        G[("Materialized Views<br/>query rewrite")]:::gold
+    end
+
+    subgraph S4["BI Layer"]
+        H{{"Superset<br/>dashboard"}}:::bi
+    end
+
+    %% =========================
+    %% Cluster Styling
+    %% =========================
+    class S1,S2,S3,S4 cluster
+
+    %% =========================
+    %% Flow
+    %% =========================
+    A -->|Python generate<br/>+ upload| B
+    B -->|Spark ingest| C
+    C -->|Build silver models| D
+    D -->|Query Iceberg tables| E
+    E -->|dbt run / test| F
+
+    F -->|Dashboard queries| H
     F --> G
-    G -. "query rewrite" .-> H
+    G -.->|Automatic query rewrite| H
 ```
 
 | Layer | Tool / Format | Storage / Object | Responsibility |
