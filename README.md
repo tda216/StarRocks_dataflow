@@ -20,19 +20,48 @@ Mục tiêu là validate StarRocks có thể query Iceberg qua External Catalog 
 
 ```mermaid
 flowchart LR
-    A["Original CSV<br/>hotel_bookings.csv"]
-    B["Generated batch CSVs<br/>stable booking_key"]
-    C["MinIO raw CSV<br/>etl_year/month/day"]
-    D["Spark Bronze ingest<br/>technical metadata only"]
-    E["Iceberg Bronze<br/>raw_hotel_bookings_history"]
-    F["StarRocks<br/>External Catalog"]
-    G["dbt views<br/>stg / dedup / current / metrics / marts"]
-    H["dbt-managed MVs<br/>selected aggregate acceleration"]
-    I["Superset<br/>mart dashboard"]
+    %% ── STYLE CLASSES ──
+    classDef source   fill:#F1EFE8,stroke:#B4B2A9,stroke-width:1.5px,color:#2C2C2A
+    classDef storage  fill:#E1F5EE,stroke:#0F6E56,stroke-width:1.5px,color:#04342C
+    classDef compute  fill:#EEEDFE,stroke:#534AB7,stroke-width:1.5px,color:#26215C
+    classDef transform fill:#FAECE7,stroke:#993C1D,stroke-width:1.5px,color:#4A1B0C
+    classDef matview  fill:#FAEEDA,stroke:#854F0B,stroke-width:1.5px,color:#412402
+    classDef bi       fill:#EAF3DE,stroke:#3B6D11,stroke-width:1.5px,color:#173404
+    classDef cluster  fill:#FAFAFA,stroke:#D3D1C7,stroke-width:1.5px,stroke-dasharray:5 5,color:#444441
 
-    A --> B --> C --> D --> E --> F --> G --> I
-    G --> H
-    H -. "query rewrite demo" .-> I
+    %% ── SUBGRAPHS (LANES) ──
+    subgraph SRC["Data Source"]
+        A["Original CSV"]:::source
+        B[["Generated Batch CSVs"]]:::source
+    end
+
+    subgraph LAKE["Lakehouse Storage"]
+        C[("MinIO<br/>(Raw Data)")]:::storage
+        D[("Bronze Iceberg<br/>(Table Format)")]:::storage
+    end
+
+    subgraph COMPUTE["Query, Transform & Optimize"]
+        E{{"StarRocks<br/>External Catalog"}}:::compute
+        F("dbt Views<br/>stg · dedup · current · metrics · fact · dim · mart"):::transform
+        G[/"Materialized Views<br/>dbt-managed"/]:::matview
+    end
+
+    subgraph BI["BI Serving"]
+        H["Superset Dashboard"]:::bi
+    end
+
+    %% ── DATA FLOW ──
+    A -- "batch gen" --> B
+    B -- "upload" --> C
+    C -- "Spark ingest" --> D
+    D -- "Iceberg catalog" --> E
+    E -- "dbt run / test" --> F
+    F -- "serve marts" --> H
+    F -. "pre-compute" .-> G
+    G -. "query rewrite" .-> H
+
+    %% ── SUBGRAPH STYLES ──
+    class SRC,LAKE,COMPUTE,BI cluster
 ```
 
 Layer responsibility:
